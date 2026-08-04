@@ -2,7 +2,7 @@
 # Multi-stage build: 1) install+build, 2) production runtime
 
 # ── Stage 1: Build ──
-FROM node:22-alpine AS builder
+FROM node:26-alpine AS builder
 
 WORKDIR /app
 
@@ -26,7 +26,7 @@ RUN npm run build -w packages/tax-engine-enterprise
 RUN npm run build -w apps/api
 
 # ── Stage 2: Production runtime ──
-FROM node:22-alpine
+FROM node:26-alpine
 
 WORKDIR /app
 
