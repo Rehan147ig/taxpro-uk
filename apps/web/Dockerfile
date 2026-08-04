@@ -31,7 +31,7 @@ RUN npm run build -w packages/tax-engine
 RUN npm run build -w apps/web
 
 # ── Stage 2: nginx ──
-FROM nginx:1.27-alpine
+FROM nginx:1.31-alpine
 
 # Copy built static assets
 COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
