@@ -17,7 +17,6 @@
     "db:synthetic": "tsx scripts/synthetic-seed.ts",
     "db:synthetic-q1": "tsx scripts/synthetic-seed.ts q1-only",
     "test": "vitest run",
-    "eval": "tsx scripts/eval/run-eval.ts",
     "eval:uk": "tsx scripts/eval/run-uk-eval.ts",
     "eval:ai-mapping": "tsx scripts/eval/run-ai-mapping-eval.ts",
     "harness": "tsx scripts/eval/run-agent-harness.ts",

@@ -1,6 +1,5 @@
 import bcrypt from 'bcryptjs';
 import { migrationDb as db } from '../config/db.js';
-import { enableUsWorkstream } from '../config/features.js';
 import { tenants } from './schema/tenants.js';
 import { users } from './schema/users.js';
 import { entities } from './schema/entities.js';
@@ -20,9 +19,7 @@ const DEMO_PERIOD = '2026-01-01';
 const DEMO_PERIOD_END = '2026-12-31';
 
 /**
- * Demo chart of accounts. The default demo tenant is UK (FRS 102, GBP);
- * when the US workstream is enabled (TAXPRO_ENABLE_US=true) the same chart is
- * also seeded against a US entity so flag-based US development stays possible.
+ * Demo chart of accounts for the UK demo tenant (FRS 102, GBP).
  */
 const demoAccounts = [
   {
@@ -177,24 +174,7 @@ async function main() {
     set: { name: 'Acme UK Ltd', taxJurisdiction: 'UK_FRS102', currency: 'GBP', updatedAt: new Date() },
   }).returning();
 
-  // The US entity is dormant by default: only seeded when TAXPRO_ENABLE_US=true
-  // (preserved as future optionality, never in the default demo tenant).
-  const [usEntity] = enableUsWorkstream
-    ? await db.insert(entities).values({
-        tenantId: tenant.id,
-        externalId: 'ACME-US',
-        name: 'Acme US Inc.',
-        type: 'domestic',
-        currency: 'USD',
-        isConsolidated: true,
-        taxJurisdiction: 'US-Federal',
-      }).onConflictDoUpdate({
-        target: [entities.tenantId, entities.externalId],
-        set: { name: 'Acme US Inc.', taxJurisdiction: 'US-Federal', currency: 'USD', updatedAt: new Date() },
-      }).returning()
-    : [null];
-
-  const entitiesToSeed = usEntity ? [ukEntity, usEntity] : [ukEntity];
+  const entitiesToSeed = [ukEntity];
 
   // ── Phase B domain model: entity group, periods, rules, proposals, documents, review items ──
   // Entity groups, mapping proposals and review items have no natural unique
@@ -487,11 +467,6 @@ async function main() {
 
   console.log(`[Seed] Demo tenant ready: demo@taxpro.ai / TaxProDemo123! (partner: partner@taxpro.ai)`);
   console.log(`[Seed] UK entity: ${ukEntity.externalId} (${ukEntity.name}, GBP, UK_FRS102)`);
-  if (usEntity) {
-    console.log(`[Seed] US entity (TAXPRO_ENABLE_US=true): ${usEntity.externalId} (${usEntity.name}, USD, US-Federal)`);
-  } else {
-    console.log(`[Seed] US entity dormant (set TAXPRO_ENABLE_US=true to seed it).`);
-  }
   console.log(`[Seed] Created ${accountCount} accounts and trial-balance rows for ${DEMO_PERIOD}.`);
   console.log(`[Seed] Phase B domain: entity group, FY2026 accounting/tax periods, 3 approved UK rules, 1 mapping proposal, 1 trial-balance doc, 2 review items.`);
 }

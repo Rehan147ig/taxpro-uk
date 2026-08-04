@@ -21,7 +21,6 @@
     "dev": "tsc -p tsconfig.json --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:us-rates": "vitest run scripts/verify-state-rates.test.ts",
     "lint": "tsc --noEmit -p tsconfig.lint.json"
   },
   "devDependencies": {

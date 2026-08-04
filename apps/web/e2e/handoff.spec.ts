@@ -14,7 +14,14 @@ test('handoff: run -> review -> submit -> partner sign-off -> lock -> filing-rea
 
   await page.getByRole('button', { name: 'Run Workbench Calculation' }).click();
   const blockedBanner = page.getByText('Run blocked', { exact: false });
-  if (await blockedBanner.isVisible({ timeout: 15_000 }).catch(() => false)) {
+  let blocked = false;
+  try {
+    await blockedBanner.waitFor({ state: 'visible', timeout: 15_000 });
+    blocked = true;
+  } catch {
+    // Run not blocked; the calculation went straight through.
+  }
+  if (blocked) {
     // Seeded pending proposal must be decided by a human first (AI proposes, humans decide).
     await expect(page.getByText(/mapping_proposals_pending/)).toBeVisible();
     await page.getByRole('link', { name: 'Proposals & Rules' }).click();

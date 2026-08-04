@@ -1,11 +1,8 @@
 import { z } from 'zod';
 
 /**
- * QuickBooks Online is a UK accounting-data source too, so the connector is
- * never hidden behind TAXPRO_ENABLE_US. The UK defaults below make a fresh
- * QBO sync produce a UK FRS 102 entity in GBP; callers who operate a US
- * entity may pass US values explicitly (US-specific mappings/tax workflows
- * remain gated by TAXPRO_ENABLE_US at the engine/export layer).
+ * QuickBooks Online is a UK accounting-data source: the connector is always
+ * mounted and sync defaults produce a UK FRS 102 entity in GBP.
  */
 export const DEFAULT_SYNC_JURISDICTION = 'UK_FRS102';
 export const DEFAULT_SYNC_CURRENCY = 'GBP';

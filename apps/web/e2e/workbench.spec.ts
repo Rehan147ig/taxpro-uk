@@ -20,7 +20,14 @@ test('workbench: import -> gated run -> recalc (new version) -> view provenance 
   // ── First run attempt: gate may block on the seeded pending proposal ──
   await page.getByRole('button', { name: 'Run Workbench Calculation' }).click();
   const blockedBanner = page.getByText('Run blocked', { exact: false });
-  if (await blockedBanner.isVisible({ timeout: 15_000 }).catch(() => false)) {
+  let blocked = false;
+  try {
+    await blockedBanner.waitFor({ state: 'visible', timeout: 15_000 });
+    blocked = true;
+  } catch {
+    // Run not blocked; the calculation went straight through.
+  }
+  if (blocked) {
     // Gate surfaced in the UI with its code.
     await expect(page.getByText(/mapping_proposals_pending/)).toBeVisible();
 

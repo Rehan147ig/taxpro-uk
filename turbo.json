@@ -33,9 +33,6 @@
     "db:synthetic": {
       "dependsOn": ["build"]
     },
-    "eval": {
-      "dependsOn": ["build"]
-    },
     "eval:uk": {
       "dependsOn": ["build"]
     },

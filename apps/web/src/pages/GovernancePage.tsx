@@ -148,7 +148,7 @@ export default function GovernancePage() {
                     {p.status === 'pending' ? (
                       <div className="flex flex-col gap-1.5">
                         <input
-                          value={deciding === p.id ? reason : ''}
+                          value={reason}
                           onChange={(e) => setReason(e.target.value)}
                           placeholder="Decision reason (required)"
                           className="border border-gray-300 rounded-button px-2 py-1 text-[10px] w-44 bg-white"

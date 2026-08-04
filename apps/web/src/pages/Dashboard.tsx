@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { provision, connections as connApi, mappings as mappingApi, apiClient } from '../api/client';
-import { useEnableUs } from '../lib/features';
 
 const gbp = (n: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(n);
 
 export default function Dashboard() {
-  const enableUs = useEnableUs();
   const [stats, setStats] = useState({ connections: 0, mappings: 0, provisions: 0 });
   const [runStatus, setRunStatus] = useState({ needsReview: 0, awaitingApproval: 0, finalized: 0, locked: 0, total: 0 });
   const [loading, setLoading] = useState(true);
@@ -79,7 +77,7 @@ export default function Dashboard() {
         <div>
           <h2 className="text-2xl font-serif font-semibold text-[#0A192F] tracking-tight">Executive Dashboard</h2>
           <p className="text-xs text-gray-500 mt-1 font-sans">
-            {enableUs ? 'Multi-jurisdiction corporate tax provision overview' : 'UK FRS 102 corporate tax provision workbench'}
+            UK FRS 102 corporate tax provision workbench
           </p>
         </div>
         <button
@@ -145,7 +143,7 @@ export default function Dashboard() {
             Run AI auto-mapping and approve proposed classifications
           </li>
           <li className={stats.provisions > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
-            Execute {enableUs ? 'ASC 740 / FRS 102' : 'UK FRS 102'} tax engine calculation
+            Execute UK FRS 102 tax engine calculation
           </li>
           <li className={runStatus.locked > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
             Partner sign-off, lock provision run, and export workpapers

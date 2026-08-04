@@ -1,8 +1,7 @@
 /**
  * UK FRS 102 ground truth schema.
  *
- * Unlike the US EDGAR harness (which fetches live XBRL from SEC), there is
- * no equivalent instant API for UK Companies House structured data in a
+ * There is no instant API for UK Companies House structured data in a
  * compatible format. These fixtures are manually curated from filed accounts.
  *
  * Source: filed statutory accounts on the UK Companies House find-and-update

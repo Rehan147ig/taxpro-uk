@@ -1,11 +1,9 @@
 import { createRootRoute, Link, Outlet, useLocation } from '@tanstack/react-router';
 import { useStore } from '../stores/provision.store';
-import { useEnableUs } from '../lib/features';
 
 function Root() {
   const { isAuthenticated, logout } = useStore();
   const { pathname } = useLocation();
-  const enableUs = useEnableUs();
 
   if (!isAuthenticated) {
     return <Outlet />;
@@ -39,7 +37,7 @@ function Root() {
               TaxPro
             </h1>
             <p className="text-xs text-gray-400 font-sans tracking-wide mt-0.5">
-              {enableUs ? 'Enterprise Tax Provision' : 'UK FRS 102 Tax Provision'}
+              UK FRS 102 Tax Provision
             </p>
           </div>
 

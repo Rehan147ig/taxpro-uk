@@ -4,11 +4,10 @@ import jwt from 'jsonwebtoken';
 import { Jurisdiction } from '@taxpro/tax-engine';
 import { resolveJurisdiction } from '../modules/provision/provision-calculator.js';
 import { syncParamsSchema, DEFAULT_SYNC_JURISDICTION, DEFAULT_SYNC_CURRENCY } from '../modules/integrations/quickbooks/sync-options.js';
-import { provisionRoutes } from '../modules/provision/provision.routes.js';
 import { errorHandler } from '../lib/middleware/error-handler.js';
 import { env } from '../config/env.js';
 
-describe('Phase A follow-up — QBO is a UK data source, US stays dormant', () => {
+describe('Phase A follow-up — QBO is a UK data source', () => {
 
   it('sync params default to a UK FRS 102 entity in GBP', () => {
     const parsed = syncParamsSchema.parse({
@@ -19,17 +18,6 @@ describe('Phase A follow-up — QBO is a UK data source, US stays dormant', () =
     expect(parsed.currency).toBe('GBP');
     expect(DEFAULT_SYNC_JURISDICTION).toBe('UK_FRS102');
     expect(DEFAULT_SYNC_CURRENCY).toBe('GBP');
-  });
-
-  it('sync params allow an explicit US jurisdiction (dormant workstream dev)', () => {
-    const parsed = syncParamsSchema.parse({
-      periodStart: '2026-01-01',
-      periodEnd: '2026-12-31',
-      jurisdiction: 'US-Federal',
-      currency: 'USD',
-    });
-    expect(parsed.jurisdiction).toBe('US-Federal');
-    expect(parsed.currency).toBe('USD');
   });
 
   it('sync params reject malformed jurisdiction or currency', () => {
@@ -47,22 +35,6 @@ describe('Phase A follow-up — QBO is a UK data source, US stays dormant', () =
     expect(resolveJurisdiction('UK')).toBe(Jurisdiction.UK_FRS102_S29);
   });
 
-  it('US 1120 export is a 403 while the US workstream is dormant (flag off)', async () => {
-    const app = new Hono();
-    app.onError(errorHandler);
-    app.route('/api/provision', provisionRoutes);
-    const token = jwt.sign(
-      { userId: 'user-1', tenantId: '00000000-0000-0000-0000-000000000001', email: 'preparer@test.local', role: 'preparer' },
-      env.JWT_SECRET,
-    );
-    const res = await app.request('/api/provision/results/00000000-0000-0000-0000-000000000001/us-1120', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    expect(res.status).toBe(403);
-    const body = await res.json() as { error: string };
-    expect(body.error).toContain('dormant');
-  });
-
   it('QBO auth-url without server credentials fails cleanly for an authenticated user (route stays mounted)', async () => {
     const app = new Hono();
     app.onError(errorHandler);
@@ -78,7 +50,7 @@ describe('Phase A follow-up — QBO is a UK data source, US stays dormant', () =
     });
     // The route must be mounted for UK tenants: 400 when QBO_CLIENT_ID is
     // unset (CI), 200 when real credentials are configured locally. A 404
-    // would mean the connector was wrongly hidden behind the US flag.
+    // would mean the connector was missing.
     expect([400, 200]).toContain(res.status);
   });
 });

@@ -4,7 +4,6 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { compress } from 'hono/compress';
 import { env } from './config/env.js';
-import { enableUsWorkstream } from './config/features.js';
 import { testConnection, closeDb, validateRuntimeRoleSecurity, logSecurityValidation } from './config/db.js';
 import { errorHandler } from './lib/middleware/error-handler.js';
 import { rateLimiter } from './lib/middleware/rate-limiter.js';
@@ -52,9 +51,6 @@ app.route('/api/health', healthRoutes);
 // Legacy health path (no auth, simple)
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// ── Feature flags (public: non-sensitive enablement switches) ──
-app.get('/api/config/flags', (c) => c.json({ enableUs: enableUsWorkstream }));
-
 // ── Routes ──
 app.route('/api/auth', authRoutes);
 app.route('/api/netsuite', netsuiteRoutes);
@@ -74,8 +70,7 @@ app.route('/api/workbench', workbenchRoutes);
 app.route('/api/handoff', handoffRoutes);
 app.route('/api/xero', xeroRoutes);
 // QuickBooks Online is a UK accounting-data source too: the connector is
-// always mounted. Sync defaults to a UK FRS 102 entity in GBP; only the
-// US-specific mappings/exports remain behind TAXPRO_ENABLE_US.
+// always mounted. Sync defaults to a UK FRS 102 entity in GBP.
 app.route('/api/qbo', qboRoutes);
 
 // ── Start ──

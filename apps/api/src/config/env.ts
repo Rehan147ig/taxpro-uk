@@ -39,9 +39,6 @@ const envSchema = z.object({
   // credentials (default); object storage plugs in behind the same interface.
   TAXPRO_STORAGE_BACKEND: z.enum(['local']).default('local'),
   TAXPRO_STORAGE_DIR: z.string().default('./storage'),
-  // US ASC 740 workstream is dormant by default (UK FRS 102 is the product).
-  // Set to 'true' only when actively developing/validating US features.
-  TAXPRO_ENABLE_US: z.enum(['true', 'false']).default('false'),
 });
 
 export const env = envSchema.parse(process.env);
