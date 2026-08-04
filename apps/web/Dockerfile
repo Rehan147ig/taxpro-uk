@@ -5,7 +5,7 @@
 # node:22-slim (glibc) rather than alpine: rollup's native binary for musl
 # (rollup-linux-x64-musl) is frequently not installed by `npm ci` in alpine
 # (npm/cli#4828), breaking `vite build`; the glibc binary installs reliably.
-FROM node:22-slim AS builder
+FROM node:26-slim AS builder
 
 WORKDIR /app
 
