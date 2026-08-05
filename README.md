@@ -4,7 +4,7 @@
 
 > TypeScript · Hono.js · React 19 · TanStack Router · Turborepo · PostgreSQL 16 (RLS) · Redis 7 · BullMQ · Decimal.js · Playwright
 
-![Tests](https://img.shields.io/badge/tests-496%20unit%20%2B%206%20e2e-2ea44f)
+![Tests](https://img.shields.io/badge/tests-615%20unit%20%2B%206%20e2e-2ea44f)
 ![UK Eval](https://img.shields.io/badge/UK%20eval-9%2F9%20PASS-2ea44f)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D22-339933)
@@ -151,10 +151,11 @@ taxpro-uk/
 | Mapping proposals | `/api/mappings/proposals` | AI/rules/import/carry-forward propose; **humans decide**; carry-forward never applies silently |
 | Rules | `/api/rules` | UK rule registry — proposals, partner/admin approval, supersede/rollback |
 | Review items | `/api/review-items` | review lifecycle — status machine, evidence request, human-only waiver |
-| Workbench | `/api/workbench` | setup → idempotent import → gated runs → recalc-as-new-version (lineage) → blockers |
+| Workbench | `/api/workbench` | setup → idempotent import → gated runs → recalc-as-new-version (lineage) → blockers; runs link to a committed import batch (`import_batch_id`, `PATCH /runs/:id/import-batch`, 409 once locked) |
 | Handoff | `/api/workbench/runs` … | handoff view, filing-ready, external filing record, manifest, package |
 | Intake | `/api/intake` | multipart upload → deterministic CSV validation → suggestions (tax memory + rules + advisory AI) → decide → gate-checked commit → supersede; adjustment approve/reject learning signals |
 | Provenance | `/api/provenance` | results / documents / agents — knowledge-graph story behind any number |
+| Export | `/api/export` | journal workpapers per result — JSON + Xero/QBO/NetSuite/generic CSV (`GET /export/journals/:resultId?format=`) |
 | Demo | `/api/demo` | demo tenant data |
 | Config | `/api/config/flags` | feature flags |
 
@@ -273,7 +274,7 @@ The Tiny Rebel fixture is a genuine marginal-relief case: its ETR reconciliation
 | Gate | Command | Result |
 |---|---|---|
 | Lint / typecheck | `npm run lint` | PASS (5/5 workspaces) |
-| Unit tests | `npm test` | **598/598 PASS** (engine 118 + enterprise 89 + API 391 across 32 files) |
+| Unit tests | `npm test` | **615/615 PASS** (engine 118 + enterprise 89 + API 408 across 33 files) |
 | Build | `npm run build` | PASS (4/4 workspaces) |
 | Operator E2E | `npm run test:e2e` | **6/6 PASS** (auth + operator workflow + workbench import→run→recalc→provenance + handoff lifecycle + tenant isolation) |
 | UK eval | `npm run eval:uk` | 9/9 PASS, mean ETR delta 1.3 bp |

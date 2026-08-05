@@ -217,5 +217,55 @@ Foundation infrastructure — no new tax features. Every number can now answer
 - **Verification:** API 391/391 (32 files; `phase-e-intake` 37 + `phase-f-intelligence`
   11 live-DB suites), monorepo lint 5/5, `tsc` clean (api + web), migrations
   0017–0020 applied on live Postgres.
-- **Limits:** NOT filing-ready; UI provenance viewer and reconciliation agent /
-  workpaper / journal persistence remain on the roadmap.
+- **Limits:** NOT filing-ready; reconciliation agent / workpaper persistence
+  shipped 2026-08-05 as Phase 1E/1G (see §6).
+
+---
+
+## 6. Phase 1E/1G — Run↔Batch Linkage, Journal Workpapers, Agent Adoption, Operator UI (shipped 2026-08-05)
+
+Turns intake batches and calculation runs into one auditable story, and lets
+the operator drive it end-to-end in the UI.
+
+- **Migration `0021` (`provision_run_batch_linkage.sql`):** `import_batch_id`
+  (uuid, nullable, FK `import_batches.id ON DELETE SET NULL`) on
+  `provision_runs`. **Migration-file convention:** the drizzle migrator
+  resolves `<tag>.sql`, so the file carries the tag name, not the `NNNN_`
+  prefix.
+- **Batch linkage (`lib/import-batch-link.ts`):** `resolveActiveImportBatch`
+  (only `committed` non-superseded batches; found via `accountingPeriods`
+  containment when the run carries an `accountingPeriodId`),
+  `requireCommittedBatch`, `assertRunBatchLinkageMutable` (409
+  `ConflictError` once a run is locked — a locked run's story is frozen).
+  Workbench `runSchema` accepts optional `importBatchId` and auto-resolves the
+  active batch; `PATCH /api/workbench/runs/:id/import-batch` (roles
+  preparer..admin, 409 when locked); recalculate inherits the linkage;
+  provision `POST /api/provision/run` auto-links and returns `importBatchId`.
+- **Journal workpapers (`modules/export/journals.ts` + `export.routes.ts`):**
+  `GET /api/export/journals/:resultId?format=` mounted at `/api/export`.
+  `buildJournalExport` prefers the engine's `detail.journalEntries` and falls
+  back to a derived FRS 102 S29 journal (current/deferred expense, deferred
+  asset/liability movement, tax payable) with balanced-line controls;
+  `journalsToCsv` emits Xero / QBO / NetSuite / generic dialects (escaped,
+  CRLF); `journalExportFileName`. Role-guarded (preparer+, read-only roles
+  export only approved/locked results).
+- **Agent framework adoption (`agent/subagents/framework-adapters.ts`):** the
+  legacy provision swarm callbacks now run through the eve framework —
+  `runMappingAgentAsAgent`, `draftAuditMemoAsAgent`, `mineCreditsAsAgent`
+  (each `runAgent` + `runReadOnly` + `emitAgentEvent` discovery event:
+  `mapping.proposals_generated`, `audit.memo_drafted`,
+  `credits.opportunities_surfaced`). `agent_events.run_id` is an FK to
+  `ai_runs`, so the provision run id travels in the event payload, never the
+  FK column.
+- **Operator UI:** Intake page `/intake` (drag-drop CSV upload, batch queue +
+  row stats + validation errors, suggestion generate/review/accept/reject,
+  gate-checked commit, adjustment review dashboard with approve/reject reason
+  modals), Provenance visualizer `/provenance/$resultId` (documents → batches
+  → balances → run → result, agent activity, adjustments, graph edges, journal
+  JSON/CSV downloads via blob), provenance link on workbench results, nav.
+- **Verification:** API 408/408 (33 files — `journals-export` 17 tests added),
+  monorepo lint 5/5, `tsc` clean (api + web), web build clean, `eval:uk` 9/9.
+- **Limits:** NOT filing-ready; journals export is a workpaper download (no
+  ledger postings, no VAT/MTD); batch linkage is advisory metadata — the
+  engine never reads imported balances unless the run is wired through the
+  workbench.
