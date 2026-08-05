@@ -40,6 +40,7 @@ import { recordProvisionEvent, getEventsForRun, EVENT_TYPES } from './provision-
 import { auditSensitiveOp } from './audit.js';
 import { assertWorkbenchApprovalGates } from '../workbench/guard.js';
 import { assertMakerChecker } from '../handoff/guard.js';
+import { recordLineageEdges } from '../../lib/lineage/edges.js';
 
 const INCOME_TYPES = new Set(['Income', 'Revenue', 'OtherIncome', 'Sales', 'ServiceRevenue']);
 const EXPENSE_TYPES = new Set(['Expense', 'COGS', 'OtherExpense', 'OperatingExpense', 'SG&A', 'CostOfSales']);
@@ -258,6 +259,22 @@ provisionRoutes.post('/run',
       };
 
       const [result] = await tx.insert(provisionResults).values(resultValues).returning();
+
+      await recordLineageEdges(tx, [
+        {
+          tenantId: user.tenantId,
+          sourceKind: 'provision_run', sourceId: run.id,
+          targetKind: 'provision_result', targetId: result.id,
+          relation: 'produced',
+        },
+        ...(calculationInput.temporaryDifferences ?? []).map((d) => ({
+          tenantId: user.tenantId,
+          sourceKind: 'provision_result', sourceId: result.id,
+          targetKind: 'account', targetId: d.accountId,
+          relation: 'used_balance',
+          metadata: { timingCategory: d.timingCategory ?? 'TEMP_OTHER', difference: String(d.difference) },
+        })),
+      ]);
 
       await recordUsageEvent(tx, {
         tenantId: user.tenantId,

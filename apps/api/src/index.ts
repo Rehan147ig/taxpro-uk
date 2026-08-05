@@ -28,6 +28,8 @@ import { ruleRoutes } from './modules/rules/rules.routes.js';
 import { reviewLifecycleRoutes } from './modules/review/review.routes.js';
 import { workbenchRoutes } from './modules/workbench/workbench.routes.js';
 import { handoffRoutes } from './modules/handoff/handoff.routes.js';
+import { intakeRoutes } from './modules/intake/intake.routes.js';
+import { provenanceRoutes } from './modules/intelligence/provenance.routes.js';
 import { logger } from './lib/logger.js';
 import { shutdownTelemetry } from './telemetry.js';
 
@@ -72,6 +74,8 @@ app.route('/api/xero', xeroRoutes);
 // QuickBooks Online is a UK accounting-data source too: the connector is
 // always mounted. Sync defaults to a UK FRS 102 entity in GBP.
 app.route('/api/qbo', qboRoutes);
+app.route('/api/intake', intakeRoutes);
+app.route('/api/provenance', provenanceRoutes);
 
 // ── Start ──
 async function main() {

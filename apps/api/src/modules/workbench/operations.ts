@@ -34,6 +34,7 @@ import {
 } from './calculator.js';
 import { evaluateRunGates, type RunGateContext } from './gates.js';
 import { hasOpenNonStandardPeriodItem } from './guard.js';
+import { recordLineageEdges } from '../../lib/lineage/edges.js';
 
 export const MAX_IMPORT_ROWS = 5000;
 
@@ -413,6 +414,22 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
     status: openCount > 0 ? 'review_required' : 'draft',
     detail,
   }).returning();
+
+  await recordLineageEdges(tx, [
+    {
+      tenantId: payload.tenantId,
+      sourceKind: 'provision_run', sourceId: runId,
+      targetKind: 'provision_result', targetId: result.id,
+      relation: 'produced',
+    },
+    ...input.temporaryDifferences.map((d) => ({
+      tenantId: payload.tenantId,
+      sourceKind: 'provision_result', sourceId: result.id,
+      targetKind: 'account', targetId: d.accountId,
+      relation: 'used_balance',
+      metadata: { timingCategory: d.timingCategory ?? 'TEMP_OTHER', difference: String(d.difference) },
+    })),
+  ]);
 
   await tx.update(provisionRuns).set({
     resultId: result.id,

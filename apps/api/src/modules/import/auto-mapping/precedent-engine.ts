@@ -47,7 +47,7 @@ function jaccardSimilarity(a: string[], b: string[]): number {
   return union.size === 0 ? 0 : intersection.size / union.size;
 }
 
-function nameSimilarity(nameA: string, nameB: string): number {
+export function nameSimilarity(nameA: string, nameB: string): number {
   const tokensA = tokenize(nameA);
   const tokensB = tokenize(nameB);
   if (tokensA.length === 0 || tokensB.length === 0) return 0;

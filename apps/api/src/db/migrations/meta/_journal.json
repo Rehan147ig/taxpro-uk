@@ -120,6 +120,34 @@
                         "when":  1787500000000,
                         "tag":  "phase_d_handoff",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  17,
+                        "version":  "0017_enterprise_intake",
+                        "when":  1790000000000,
+                        "tag":  "enterprise_intake",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  18,
+                        "version":  "0018_intake_delete_policies",
+                        "when":  1790001000000,
+                        "tag":  "intake_delete_policies",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  19,
+                        "version":  "0019_intelligence_layer",
+                        "when":  1790002000000,
+                        "tag":  "intelligence_layer",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  20,
+                        "version":  "0020_adjustment_review",
+                        "when":  1790003000000,
+                        "tag":  "adjustment_review",
+                        "breakpoints":  true
                     }
                 ]
 }

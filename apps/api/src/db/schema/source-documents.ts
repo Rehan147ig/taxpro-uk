@@ -18,13 +18,17 @@ export const sourceDocuments = pgTable('source_documents', {
   storageKey: varchar('storage_key', { length: 255 }).notNull(),
   sha256: varchar('sha256', { length: 64 }).notNull(),
   provenance: varchar('provenance', { length: 60 }).notNull().default('manual_upload'),
+  sourceSystem: varchar('source_system', { length: 60 }),
   extractionStatus: varchar('extraction_status', { length: 30 }).notNull().default('not_required'),
   extractionVersion: varchar('extraction_version', { length: 40 }),
+  parserVersion: varchar('parser_version', { length: 80 }),
+  ocrVersion: varchar('ocr_version', { length: 80 }),
   version: integer('version').notNull().default(1),
   parentDocumentId: uuid('parent_document_id'),
   isCurrent: boolean('is_current').notNull().default(true),
   uploadedByUserId: uuid('uploaded_by_user_id').references(() => users.id),
   createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
 }, (table) => ({
   unq: {
     name: 'uq_source_documents_tenant_storage_key',

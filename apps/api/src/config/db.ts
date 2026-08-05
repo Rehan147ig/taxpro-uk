@@ -15,6 +15,9 @@ export const pool = new Pool({
 
 export const db = drizzle(pool, { schema });
 
+/** Transaction client type as produced by db.transaction() (and withTenantContext). */
+export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 // Migration pool: connects as schema_owner role for Drizzle migrations
 export const migrationPool = new Pool({
   connectionString: env.DATABASE_URL_MIGRATIONS,
