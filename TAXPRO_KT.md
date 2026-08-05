@@ -172,3 +172,50 @@ to live Postgres and RLS/integration gates verified.
   handoff, evidence-manifest completion and external filing records are Phase
   D; mapping decisions stay human-owned; uncovered items become review items
   or gate blockers, never silent engine output.
+
+---
+
+## 5. Enterprise Intake + Tax Intelligence Layer (shipped 2026-08-05)
+
+Foundation infrastructure — no new tax features. Every number can now answer
+"where did this come from?" through persisted graph edges and an evidence trail.
+
+- **Migrations:** `0017` `enterprise_intake` — `import_batches/rows/events`
+  (append-only ledger), `data_lineage_edges`, `evidence_links`, tax memory
+  (`tax_memory_precedents`, `mapping_suggestions`), `reviewer_feedback_events`,
+  `rule_version_hash`. `0018` — DELETE policies for evidence links + precedents
+  (0017 created SELECT/INSERT/UPDATE only). `0019` `intelligence_layer` —
+  `source_documents` evidence metadata (`source_system`, `parser_version`,
+  `ocr_version`, `updated_at`), `import_batches` `storage_key`/`parser_version`,
+  append-only `agent_events` outbox (tenant RLS, SELECT/INSERT grants,
+  `reject_agent_event_mutation` trigger). `0020` `adjustment_review` —
+  `tax_adjustments` status/decided_by/decided_at/decision_reason.
+- **Intake (`modules/intake`):** upload → deterministic CSV validation →
+  suggestions (tax memory + rules + bounded AI, advisory only) → decide →
+  gate-checked commit (accounts + trial balance + lineage + supersede prior
+  batch) → metrics; AI tracing RLS-safe (agent tracer takes `tenantId`).
+- **Evidence persistence (`modules/intelligence/evidence.service.ts`):** every
+  intake upload stores raw bytes (tenant-scoped storage key + sha256) →
+  `source_documents` → batch auto-link, so committed records trace to their
+  exact source bytes; storage failure is non-fatal, DB failure cleans bytes.
+- **Knowledge graph at calc time:** `produced` (run → result) and
+  `used_balance` (result → account) edges written idempotently
+  (`lib/lineage/edges.ts`, `ON CONFLICT DO NOTHING`) at both calc paths
+  (`provision.routes.ts`, `workbench/operations.ts`).
+- **Provenance API (`modules/intelligence`):** `GET /api/provenance/results/:id`
+  (run, producedBy, calculatedFrom, batches, documents, adjustments, agent
+  events, edges), `GET /api/provenance/documents/:id`, `GET /api/provenance/agents`
+  (registry). Cross-tenant → 404 (fail closed).
+- **Agent framework (`eve/agent.ts`):** `defineAgent` registry +
+  `emitAgentEvent` (outbox) + `runReadOnly` (real `SET TRANSACTION READ ONLY`
+  guard — agent writes fail loudly) + `recordAgentStep` (ai_steps only) +
+  `runAgent`. Roster: `platform`, `intake_agent`, `mapping_agent`,
+  `audit_defense_agent`, `credit_miner`, `learning_system`.
+- **Learning system:** `POST /api/intake/adjustments/:id/approve|reject` —
+  status transition + immutable `reviewer_feedback_events` + `learning_system`
+  agent event in one transaction.
+- **Verification:** API 391/391 (32 files; `phase-e-intake` 37 + `phase-f-intelligence`
+  11 live-DB suites), monorepo lint 5/5, `tsc` clean (api + web), migrations
+  0017–0020 applied on live Postgres.
+- **Limits:** NOT filing-ready; UI provenance viewer and reconciliation agent /
+  workpaper / journal persistence remain on the roadmap.

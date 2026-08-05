@@ -153,6 +153,8 @@ taxpro-uk/
 | Review items | `/api/review-items` | review lifecycle — status machine, evidence request, human-only waiver |
 | Workbench | `/api/workbench` | setup → idempotent import → gated runs → recalc-as-new-version (lineage) → blockers |
 | Handoff | `/api/workbench/runs` … | handoff view, filing-ready, external filing record, manifest, package |
+| Intake | `/api/intake` | multipart upload → deterministic CSV validation → suggestions (tax memory + rules + advisory AI) → decide → gate-checked commit → supersede; adjustment approve/reject learning signals |
+| Provenance | `/api/provenance` | results / documents / agents — knowledge-graph story behind any number |
 | Demo | `/api/demo` | demo tenant data |
 | Config | `/api/config/flags` | feature flags |
 
@@ -271,7 +273,7 @@ The Tiny Rebel fixture is a genuine marginal-relief case: its ETR reconciliation
 | Gate | Command | Result |
 |---|---|---|
 | Lint / typecheck | `npm run lint` | PASS (5/5 workspaces) |
-| Unit tests | `npm test` | **496/496 PASS** (engine 118 + enterprise 35 + API 343 across 30 files) |
+| Unit tests | `npm test` | **598/598 PASS** (engine 118 + enterprise 89 + API 391 across 32 files) |
 | Build | `npm run build` | PASS (4/4 workspaces) |
 | Operator E2E | `npm run test:e2e` | **6/6 PASS** (auth + operator workflow + workbench import→run→recalc→provenance + handoff lifecycle + tenant isolation) |
 | UK eval | `npm run eval:uk` | 9/9 PASS, mean ETR delta 1.3 bp |
