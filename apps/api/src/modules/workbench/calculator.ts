@@ -92,6 +92,8 @@ export function buildWorkbenchCalculationInput(args: {
   accountMap: Map<string, typeof accounts.$inferSelect>;
   taxRate: number;
   stateTaxRate?: number;
+  /** Entity tax jurisdiction (e.g. UK_FRS102_S29). UK fixed assets use CAA 2001 pool rates. */
+  taxJurisdiction?: string;
 }): WorkbenchCalculationInput {
   let totalRevenue = 0;
   let totalExpenses = 0;
@@ -138,6 +140,8 @@ export function buildWorkbenchCalculationInput(args: {
           timingCategory: mapping.timingCategory ?? undefined,
         } as any]]),
         args.period,
+        1,
+        args.taxJurisdiction ? { jurisdiction: args.taxJurisdiction } : undefined,
       );
       const computed = computedList[0];
 

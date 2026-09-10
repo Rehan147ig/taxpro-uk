@@ -34,7 +34,8 @@ import { withSpan } from '@superlog/otel-helpers';
 import { tracer, agentRunCounter, provisionRunCounter, reviewResolutionCounter, packageExportCounter } from '../../lib/observability.js';
 import { runProvisionMath, resolveJurisdiction } from './provision-calculator.js';
 import { resolveRulesUsed } from '../rules/rules.routes.js';
-import { recordUsageEvent, pricePerProvision } from '../billing/usage.js';
+import { EVENT_PROVISION_BILLABLE, hasUsageEvent, recordUsageEvent } from '../billing/usage.js';
+import { assertProvisionEntitlement, checkProvisionEntitlement, ensureTenantSubscription } from '../billing/entitlements.js';
 import { computeBookTaxDifferences, Decimal } from '@taxpro/tax-engine';
 import { recordProvisionEvent, getEventsForRun, EVENT_TYPES } from './provision-events.js';
 import { auditSensitiveOp } from './audit.js';
@@ -76,6 +77,13 @@ provisionRoutes.post('/run',
   return withTenantContext(user.tenantId, async (tx) => {
     const [tenant] = await tx.select().from(tenants).where(eq(tenants.id, user.tenantId)).limit(1);
     if (!tenant) throw new BadRequestError('Tenant not found');
+
+    // ── Sprint 2 entitlement guard (API boundary, not just frontend hiding) ──
+    // Determines whether this run will be free_trial / included / overage
+    // BEFORE starting the expensive workflow. Blocks only when the
+    // subscription is past_due / cancelled / expired (402 + upgrade metadata).
+    await ensureTenantSubscription(tx, user.tenantId);
+    const entitlement = await assertProvisionEntitlement(tx, user.tenantId);
 
     const periodEnd = endPeriod ?? period;
     const tenantEntities = entityId
@@ -159,6 +167,7 @@ provisionRoutes.post('/run',
         ? { openCount: 0 }
         : await createReviewItemsForRun(tx, run.id, user.tenantId, tbData, mappingMap, accountMap);
       const grouped = groupTrialBalanceByAccount(tbData);
+      const runTaxJurisdiction = tenantEntities[0]?.taxJurisdiction ?? undefined;
 
       const calculationInput = !useDirect
         ? await buildAgentCalculationInput(tx, {
@@ -173,6 +182,7 @@ provisionRoutes.post('/run',
           mappings,
           accountMap,
           tbData,
+          taxJurisdiction: runTaxJurisdiction,
         }).catch(async (err) => {
           logger.warn({ err }, '[Provision] Eve agent failed, falling back to direct');
           await tx.update(provisionRuns).set({
@@ -188,6 +198,7 @@ provisionRoutes.post('/run',
             accountMap,
             tbData,
             tenant,
+            taxJurisdiction: runTaxJurisdiction,
           });
         })
         : buildDeterministicCalculationInput({
@@ -198,6 +209,7 @@ provisionRoutes.post('/run',
           accountMap,
           tbData,
           tenant,
+          taxJurisdiction: runTaxJurisdiction,
         });
 
       await tx.update(provisionRuns).set({
@@ -207,7 +219,7 @@ provisionRoutes.post('/run',
         updatedAt: new Date(),
       }).where(eq(provisionRuns.id, run.id));
 
-      const calculation = runProvisionMath(calculationInput, resolveJurisdiction(tenantEntities[0]?.taxJurisdiction));
+      const calculation = runProvisionMath(calculationInput, resolveJurisdiction(runTaxJurisdiction));
       const missingMetadata = calculationInput.missingDepreciationMetadata ?? [];
       for (const accountId of missingMetadata) {
         const account = accountMap.get(accountId);
@@ -276,12 +288,11 @@ provisionRoutes.post('/run',
         })),
       ]);
 
-      await recordUsageEvent(tx, {
-        tenantId: user.tenantId,
-        provisionRunId: run.id,
-        unitPrice: pricePerProvision(),
-        metadata: { period, mode },
-      });
+      // ── Sprint 1 billing fix ──
+      // Usage is NOT recorded here. A raw calculation attempt is not a
+      // charge: the run may still fail review, be rejected, recalculated,
+      // or abandoned. The single billable event is recorded once at
+      // finalize OR lock (first wins) — see billRunOnce() below.
 
       await tx.update(provisionRuns).set({
         resultId: result.id,
@@ -400,6 +411,13 @@ provisionRoutes.post('/run',
         ...calculation,
         agent: !useDirect,
         agentReasoning: 'agentReasoning' in calculationInput ? calculationInput.agentReasoning : undefined,
+        billing: {
+          billableEvent: 'recorded at finalize or lock, not at calculation',
+          entitlementDecision: entitlement.decision,
+          unitPricePreview: entitlement.unitPrice,
+          upgradeRequired: entitlement.upgradeRequired,
+          message: entitlement.message,
+        },
       });
     } catch (err) {
       provisionRunCounter.add(1, { outcome: 'error', mode: mode as string });
@@ -796,6 +814,55 @@ provisionRoutes.get('/results/:id/cto-xml', async (c) => {
   });
 });
 
+/**
+ * Record the single billable usage event for a run (Sprint 1).
+ *
+ * Policy:
+ * - Billable milestone = first of finalize / lock (whoever calls first wins
+ *   via the (tenant_id, provision_run_id, event_type) unique constraint).
+ * - Failed runs (status 'failed') are never billed.
+ * - Duplicate calls (e.g. lock after finalize, retries) are no-ops.
+ * - The entitlement decision + unit price are snapshotted immutably so
+ *   later plan/price changes never rewrite history.
+ */
+async function billRunOnce(
+  tx: any,
+  args: { tenantId: string; provisionRunId: string; sourceLifecycle: 'finalize' | 'lock'; period?: string },
+): Promise<{ billed: boolean; reason: string; unitPrice?: number; entitlementDecision?: string }> {
+  const [run] = await tx.select({
+    id: provisionRuns.id,
+    status: provisionRuns.status,
+    rejectedAt: provisionRuns.rejectedAt,
+  }).from(provisionRuns)
+    .where(and(eq(provisionRuns.id, args.provisionRunId), eq(provisionRuns.tenantId, args.tenantId)))
+    .limit(1);
+  if (!run) return { billed: false, reason: 'run_not_found' };
+  if ((run as any).status === 'failed') return { billed: false, reason: 'run_failed_not_billable' };
+  if ((run as any).rejectedAt) return { billed: false, reason: 'run_rejected_not_billable' };
+
+  if (await hasUsageEvent(tx, args.tenantId, args.provisionRunId, EVENT_PROVISION_BILLABLE)) {
+    return { billed: false, reason: 'already_billed' };
+  }
+
+  // Re-resolve entitlement at billing time (allowance may have changed
+  // between run start and finalize/lock). Free allowance applies first.
+  const entitlement = await checkProvisionEntitlement(tx, args.tenantId).catch(() => null);
+  const unitPrice = entitlement ? entitlement.unitPrice : 0;
+  const entitlementDecision = entitlement ? entitlement.decision : 'billable';
+
+  const res = await recordUsageEvent(tx, {
+    tenantId: args.tenantId,
+    provisionRunId: args.provisionRunId,
+    eventType: EVENT_PROVISION_BILLABLE,
+    unitPrice,
+    sourceLifecycle: args.sourceLifecycle,
+    entitlementDecision,
+    metadata: { period: args.period ?? null, billedAt: args.sourceLifecycle },
+  });
+  if (res.duplicate) return { billed: false, reason: 'already_billed' };
+  return { billed: true, reason: entitlementDecision, unitPrice, entitlementDecision };
+}
+
 function groupTrialBalanceByAccount(tbData: Array<typeof trialBalance.$inferSelect>) {
   const grouped = new Map<string, number>();
   for (const tb of tbData) {
@@ -811,6 +878,8 @@ function detectMissingDepreciationMetadata(args: {
   tbData: Array<typeof trialBalance.$inferSelect>;
   entityId?: string;
   period: string;
+  /** Entity tax jurisdiction (e.g. UK_FRS102_S29). UK fixed assets use CAA 2001 pool rates. */
+  taxJurisdiction?: string;
 }) {
   const missing: string[] = [];
   for (const [accountId] of args.grouped) {
@@ -833,7 +902,9 @@ function detectMissingDepreciationMetadata(args: {
         bookTreatment: mapping.bookTreatment,
         timingCategory: mapping.timingCategory ?? undefined,
       } as any]]),
-      args.period
+      args.period,
+      1,
+      args.taxJurisdiction ? { jurisdiction: args.taxJurisdiction } : undefined
     )[0];
     if (computed?.depreciationAgeSource === 'no_metadata' && !missing.includes(accountId)) {
       missing.push(accountId);
@@ -850,6 +921,8 @@ function buildDeterministicCalculationInput(args: {
   accountMap: Map<string, typeof accounts.$inferSelect>;
   tbData: Array<typeof trialBalance.$inferSelect>;
   tenant: typeof tenants.$inferSelect;
+  /** Entity tax jurisdiction (e.g. UK_FRS102_S29). UK fixed assets use CAA 2001 pool rates. */
+  taxJurisdiction?: string;
 }) {
   let totalRevenue = 0;
   let totalExpenses = 0;
@@ -871,6 +944,7 @@ function buildDeterministicCalculationInput(args: {
     tbData: args.tbData,
     entityId: args.entityId,
     period: args.period,
+    taxJurisdiction: args.taxJurisdiction,
   });
 
   for (const [accountId, balance] of args.grouped) {
@@ -895,7 +969,9 @@ function buildDeterministicCalculationInput(args: {
         }],
         [],
         new Map([[accountId, { accountId, taxAccountType: mapping.taxAccountType, bookTreatment: mapping.bookTreatment, timingCategory: mapping.timingCategory ?? undefined } as any]]),
-        args.period
+        args.period,
+        1,
+        args.taxJurisdiction ? { jurisdiction: args.taxJurisdiction } : undefined
       );
       const computed = computedList[0];
 
@@ -939,6 +1015,8 @@ async function buildAgentCalculationInput(tx: any, args: {
   mappings: Array<typeof taxMappings.$inferSelect>;
   accountMap: Map<string, typeof accounts.$inferSelect>;
   tbData: Array<typeof trialBalance.$inferSelect>;
+  /** Entity tax jurisdiction (e.g. UK_FRS102_S29). UK fixed assets use CAA 2001 pool rates. */
+  taxJurisdiction?: string;
 }) {
   const trialBalanceForAgent = Array.from(args.grouped.entries()).map(([accountId, balance]) => {
     const account = args.accountMap.get(accountId);
@@ -1008,6 +1086,7 @@ async function buildAgentCalculationInput(tx: any, args: {
         tbData: args.tbData,
         entityId: args.entityId,
         period: args.period,
+        taxJurisdiction: args.taxJurisdiction,
       }),
       entityId: args.entityId ?? 'consolidated',
       period: args.period,
@@ -1345,9 +1424,16 @@ provisionRoutes.post('/runs/:runId/finalize',
 
           await assertWorkbenchApprovalGates(tx, user.tenantId, run);
 
-          const openItems = await tx.select().from(reviewItems)
-            .where(and(eq(reviewItems.provisionRunId, runId), eq(reviewItems.status, 'open')));
-          if (openItems.length > 0) throw new BadRequestError(`Cannot finalize: ${openItems.length} review item(s) still open`);
+          // P1: block finalize on ANY non-final review state (open,
+          // in_progress, waiting_for_evidence) — not just 'open'. The
+          // review lifecycle (review-lifecycle.ts) treats resolved /
+          // rejected / waived as final; everything else must be closed.
+          const unresolvedItems = await tx.select({ id: reviewItems.id, status: reviewItems.status }).from(reviewItems)
+            .where(and(
+              eq(reviewItems.provisionRunId, runId),
+              not(inArray(reviewItems.status, ['resolved', 'rejected', 'waived'])),
+            ));
+          if (unresolvedItems.length > 0) throw new BadRequestError(`Cannot finalize: ${unresolvedItems.length} review item(s) still unresolved`);
 
           const now = new Date();
           await tx.update(provisionRuns).set({
@@ -1356,17 +1442,25 @@ provisionRoutes.post('/runs/:runId/finalize',
             updatedAt: now,
           }).where(eq(provisionRuns.id, runId));
 
+          // ── Sprint 1 billable milestone (first of finalize/lock wins) ──
+          const billing = await billRunOnce(tx, {
+            tenantId: user.tenantId,
+            provisionRunId: runId,
+            sourceLifecycle: 'finalize',
+            period: run.period,
+          });
+
           await auditSensitiveOp(tx, {
             tenantId: user.tenantId,
             runId,
             action: 'run.finalized',
             actorUserId: user.userId,
             actorRole: user.role,
-            details: { period: run.period, etrVariance: null, finalizedAt: now.toISOString() },
+            details: { period: run.period, etrVariance: null, finalizedAt: now.toISOString(), billing },
             requestId: c.get('requestId'),
           });
 
-          return c.json({ runId, status: 'finalized' });
+          return c.json({ runId, status: 'finalized', billing });
         });
       },
       {
@@ -1483,17 +1577,26 @@ provisionRoutes.post('/runs/:runId/lock',
         updatedAt: now,
       }).where(eq(provisionRuns.id, runId));
 
+      // ── Sprint 1 billable milestone (first of finalize/lock wins) ──
+      // Runs finalized earlier are already billed — this call is a no-op then.
+      const billing = await billRunOnce(tx, {
+        tenantId: user.tenantId,
+        provisionRunId: runId,
+        sourceLifecycle: 'lock',
+        period: run.period,
+      });
+
       await auditSensitiveOp(tx, {
         tenantId: user.tenantId,
         runId,
         action: 'run.locked',
         actorUserId: user.userId,
         actorRole: user.role,
-        details: { previousStatus: run.status, previousApprovalStatus: run.approvalStatus },
+        details: { previousStatus: run.status, previousApprovalStatus: run.approvalStatus, billing },
         requestId: c.get('requestId'),
       });
 
-      return c.json({ runId, status: 'locked' });
+      return c.json({ runId, status: 'locked', billing });
     });
 });
 

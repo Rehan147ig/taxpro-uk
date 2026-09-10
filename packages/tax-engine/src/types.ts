@@ -162,6 +162,13 @@ export interface DeferredTaxLine {
   reversals: USD;
   closingBalance: USD;
   dtType: 'DTA' | 'DTL';
+  /**
+   * P1: set when the input difference sign contradicts the bucket direction
+   * (deductible buckets expect ≤ 0, taxable buckets expect ≥ 0). The amount
+   * is still recognised by magnitude; the note tells the reviewer to confirm
+   * the mapping rather than silently accepting it.
+   */
+  directionNote?: string;
 }
 
 export interface DeferredTaxResult {
@@ -206,6 +213,12 @@ export interface ETRInput {
   permanentDifferences: PermanentDifferenceItem[];
   taxCredits: USD;
   otherAdjustments: PermanentDifferenceItem[];
+  /**
+   * P1: optional jurisdiction for UK-safe rendering. When UK_FRS102_S29,
+   * calculateETR() suppresses the US state-benefit line and labels the
+   * statutory line as the UK main rate. Omitted = legacy US behaviour.
+   */
+  jurisdiction?: Jurisdiction;
 }
 
 export interface ETRLine {

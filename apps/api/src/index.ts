@@ -30,6 +30,7 @@ import { workbenchRoutes } from './modules/workbench/workbench.routes.js';
 import { handoffRoutes } from './modules/handoff/handoff.routes.js';
 import { intakeRoutes } from './modules/intake/intake.routes.js';
 import { provenanceRoutes } from './modules/intelligence/provenance.routes.js';
+import { exportRoutes } from './modules/export/export.routes.js';
 import { logger } from './lib/logger.js';
 import { shutdownTelemetry } from './telemetry.js';
 
@@ -76,6 +77,7 @@ app.route('/api/xero', xeroRoutes);
 app.route('/api/qbo', qboRoutes);
 app.route('/api/intake', intakeRoutes);
 app.route('/api/provenance', provenanceRoutes);
+app.route('/api/export', exportRoutes);
 
 // ── Start ──
 async function main() {

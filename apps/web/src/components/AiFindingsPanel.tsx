@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import type { AiAgentRun } from '../api/client';
 
 interface Props {
@@ -9,7 +9,7 @@ function findAgent(agents: AiAgentRun[], name: string) {
   return agents.find(a => a.workflowName === name);
 }
 
-const fmt$ = (n: number) => `$${Math.round(n).toLocaleString()}`;
+const fmtGbp = (n: number) => `£${Math.round(n).toLocaleString()}`;
 
 export default function AiFindingsPanel({ findings }: Props) {
   if (!findings) return null;
@@ -65,7 +65,7 @@ export default function AiFindingsPanel({ findings }: Props) {
                   <p className="text-xs text-brand-600 mt-0.5">{m.ircSection} · {m.citation}</p>
                   <p className="text-xs text-gray-600 mt-1">{m.narrative}</p>
                   {typeof m.taxImpact === 'number' && (
-                    <p className="text-xs text-gray-500 mt-1">Tax impact: {fmt$(m.taxImpact)}</p>
+                    <p className="text-xs text-gray-500 mt-1">Tax impact: {fmtGbp(m.taxImpact)}</p>
                   )}
                 </div>
               ))}
@@ -96,22 +96,22 @@ export default function AiFindingsPanel({ findings }: Props) {
             <h4 className="font-medium text-sm">Credit Opportunities</h4>
             {credits.summary.totalIdentifiedCredits > 0 && (
               <span className="px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700">
-                ~{fmt$(credits.summary.totalIdentifiedCredits)} identified
+                ~{fmtGbp(credits.summary.totalIdentifiedCredits)} identified
               </span>
             )}
           </div>
 
           {credits.rdCredit && (
             <div className="border border-gray-100 rounded-lg p-3 mb-2">
-              <p className="text-sm font-medium">R&D Credit (IRC Sec 41)</p>
+              <p className="text-sm font-medium">R&D relief — requires UK review (US Sec 41 output)</p>
               <p className="text-xs text-gray-600 mt-1">
-                QRE: {fmt$(credits.rdCredit.qualifiedResearchExpenses)} → estimated credit {fmt$(credits.rdCredit.computedCredit)} ({credits.rdCredit.method.replace(/_/g, ' ')})
+                QRE: {fmtGbp(credits.rdCredit.qualifiedResearchExpenses)} → estimated credit {fmtGbp(credits.rdCredit.computedCredit)} ({credits.rdCredit.method.replace(/_/g, ' ')})
               </p>
               {credits.rdCredit.accountsIdentified?.length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-1">
                   {credits.rdCredit.accountsIdentified.map((a: any, i: number) => (
                     <span key={i} className="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600">
-                      {a.name} ({fmt$(a.amount)})
+                      {a.name} ({fmtGbp(a.amount)})
                     </span>
                   ))}
                 </div>
@@ -121,9 +121,9 @@ export default function AiFindingsPanel({ findings }: Props) {
 
           {credits.section174 && (
             <div className="border border-gray-100 rounded-lg p-3 mb-2">
-              <p className="text-sm font-medium">Sec 174 R&E Capitalization</p>
+              <p className="text-sm font-medium">R&D capitalisation — requires UK review (US Sec 174 output)</p>
               <p className="text-xs text-gray-600 mt-1">
-                {fmt$(credits.section174.totalQualifiedExpenses)} over {credits.section174.domesticAmortizationPeriod}yr → {fmt$(credits.section174.domesticAmortizationCurrent)}/yr amortization (DTA)
+                {fmtGbp(credits.section174.totalQualifiedExpenses)} over {credits.section174.domesticAmortizationPeriod}yr → {fmtGbp(credits.section174.domesticAmortizationCurrent)}/yr amortization (DTA)
               </p>
             </div>
           )}
@@ -131,7 +131,7 @@ export default function AiFindingsPanel({ findings }: Props) {
           {credits.energyCredits?.map((e: any, i: number) => (
             <div key={i} className="border border-gray-100 rounded-lg p-3 mb-2">
               <p className="text-sm font-medium">{e.ircSection} — {e.type.replace(/_/g, ' ')}</p>
-              <p className="text-xs text-gray-600 mt-1">{e.description}: ~{fmt$(e.estimatedCredit)}</p>
+              <p className="text-xs text-gray-600 mt-1">{e.description}: ~{fmtGbp(e.estimatedCredit)}</p>
             </div>
           ))}
 
@@ -159,7 +159,7 @@ export default function AiFindingsPanel({ findings }: Props) {
                   <tr>
                     <th className="text-left px-2 py-1.5 font-medium text-gray-500">Tax Category</th>
                     <th className="text-left px-2 py-1.5 font-medium text-gray-500">Treatment</th>
-                    <th className="text-left px-2 py-1.5 font-medium text-gray-500">IRC</th>
+                    <th className="text-left px-2 py-1.5 font-medium text-gray-500">Section</th>
                     <th className="text-left px-2 py-1.5 font-medium text-gray-500">Conf.</th>
                   </tr>
                 </thead>
@@ -197,3 +197,4 @@ export default function AiFindingsPanel({ findings }: Props) {
     </div>
   );
 }
+

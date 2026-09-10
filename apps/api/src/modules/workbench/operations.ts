@@ -35,6 +35,7 @@ import {
 import { evaluateRunGates, type RunGateContext } from './gates.js';
 import { hasOpenNonStandardPeriodItem } from './guard.js';
 import { recordLineageEdges } from '../../lib/lineage/edges.js';
+import { splitPeriodByUkFiscalYear, blendedUkMainRate } from '@taxpro/tax-engine';
 
 export const MAX_IMPORT_ROWS = 5000;
 
@@ -266,6 +267,7 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
     accountMap,
     taxRate: Number(tenant.taxRate),
     stateTaxRate: Number(tenant.stateTaxRate ?? 0),
+    taxJurisdiction: entity.taxJurisdiction ?? undefined,
   });
 
   const { calculation, warnings } = runWorkbenchCalculation({
@@ -273,21 +275,38 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
     taxJurisdiction: entity.taxJurisdiction,
   });
 
-  const periodStraddlesFiscalYears = new Date(taxPeriod.startDate).getFullYear() !== new Date(taxPeriod.endDate).getFullYear();
+  // P1: disclose the concrete FY day-split instead of a generic warning.
+  // Rates are applied at the period-end FY rate; the split below shows the
+  // reviewer exactly how much of the period falls in each fiscal year.
+  // Note: FY straddle is measured on fiscal years (Apr–Mar), NOT calendar
+  // years — a 1 Apr–31 Mar period is a single FY despite spanning Jan 1st.
+  let periodStraddlesFiscalYears = new Date(taxPeriod.startDate).getFullYear() !== new Date(taxPeriod.endDate).getFullYear();
+  let fiscalYearSplitNote = 'The tax period falls within a single fiscal year.';
+  try {
+    const slices = splitPeriodByUkFiscalYear(taxPeriod.startDate, taxPeriod.endDate);
+    periodStraddlesFiscalYears = slices.length > 1;
+    if (periodStraddlesFiscalYears) {
+      const blended = blendedUkMainRate(taxPeriod.startDate, taxPeriod.endDate, {});
+      const parts = slices.map((s) => `FY${s.fiscalYear}: ${s.days}d (${(s.fraction * 100).toFixed(1)}%)`).join(', ');
+      fiscalYearSplitNote = `This tax period straddles fiscal years (${parts}); day-weighted main rate ${(blended.toNumber() * 100).toFixed(2)}%. Rates are applied at the period-end FY rate — confirm the split before filing.`;
+    }
+  } catch {
+    fiscalYearSplitNote = periodStraddlesFiscalYears
+      ? 'This tax period straddles fiscal years; the run flags the period for review and does not automatically split the rate calculation across years.'
+      : 'The tax period falls within a single fiscal year.';
+  }
   const assumptions = [
     'UK corporation tax main rate 25% applied per fiscal year (FY2023 onwards); small profits rate 19% below the small profits limit and marginal relief between the limits (CTA 2010 s.18D).',
     'Deferred tax computed under FRS 102 Section 29 with a full recovery assessment; no discounting is applied.',
-    'Capital allowances are reflected through temporary differences between book and tax balances; no separate capital allowances computation is performed.',
+    'Capital allowances follow CAA 2001 pool treatment for UK fixed assets (main-pool WDA 18% by default; 100% first-year relief only when evidenced, otherwise a review item is raised).',
     'R&D figures are taken from the trial balance as supported amounts; entitlement to enhanced relief requires manual review.',
-    periodStraddlesFiscalYears
-      ? 'This tax period straddles fiscal years; the run flags the period for review and does not automatically split the rate calculation across years.'
-      : 'The tax period falls within a single fiscal year.',
+    fiscalYearSplitNote,
   ];
 
   if (periodStraddlesFiscalYears) {
     warnings.push({
       code: 'fiscal_year_straddling',
-      message: `Tax period ${taxPeriod.startDate} to ${taxPeriod.endDate} straddles fiscal years; the run does not auto-split rates across the boundary.`,
+      message: `Tax period ${taxPeriod.startDate} to ${taxPeriod.endDate} straddles fiscal years. ${fiscalYearSplitNote}`,
     });
   }
 

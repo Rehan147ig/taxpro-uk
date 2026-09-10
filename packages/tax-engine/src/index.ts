@@ -21,6 +21,25 @@ export {
   UK_MARGINAL_RELIEF_UPPER,
   UK_MARGINAL_RELIEF_FRACTION,
 } from './uk-frs102-s29/rules.js';
+export {
+  calculateUkCapitalAllowance,
+  UK_AIA_ANNUAL_LIMIT,
+  UK_MAIN_POOL_WDA_RATE,
+  UK_SPECIAL_POOL_WDA_RATE,
+  UK_SBA_RATE,
+  UK_FULL_EXPENSING_RATE,
+  UK_SPECIAL_FIRST_YEAR_RATE,
+  UK_SMALL_POOLS_LIMIT,
+} from './uk-frs102-s29/capital-allowances.js';
+export type { UkAllowancePool, UkCapitalAllowanceInput, UkCapitalAllowanceResult } from './uk-frs102-s29/capital-allowances.js';
+export {
+  ukFiscalYearOf,
+  splitPeriodByUkFiscalYear,
+  blendedUkMainRate,
+  apportionUkProfitLimitForShortPeriod,
+} from './uk-frs102-s29/fiscal-years.js';
+export type { UkFiscalYearSlice } from './uk-frs102-s29/fiscal-years.js';
+export { remeasureUkDeferredTaxBalance, directionNoteFor } from './uk-frs102-s29/deferred-tax.js';
 export { Jurisdiction } from './types.js';
 export { createEngine } from './engine-factory.js';
 export type { TaxEngine } from './engine-factory.js';

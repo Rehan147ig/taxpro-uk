@@ -250,4 +250,74 @@ describe('UK FRS 102 Section 29 — Deferred Tax', () => {
       expect(r.totalClosingDTA.toNumber()).toBe(10_500);
     });
   });
+
+  describe('direction honesty', () => {
+    it('sets no note when the sign matches the bucket', () => {
+      const r = ukDeferredTaxLine({
+        entityId: 'e1',
+        timingCategory: 'deductible_temporary',
+        openingDTA: new Decimal(0),
+        openingDTL: new Decimal(0),
+        currentYearTemporaryChange: new Decimal('-100000'),
+        taxRate: new Decimal('0.25'),
+        dtType: 'DTA',
+        probableRecovery: true,
+        jurisdiction: Jurisdiction.UK_FRS102_S29,
+      });
+      expect(r.directionNote).toBeUndefined();
+      expect(r.deferredTaxAmount.toNumber()).toBe(25_000);
+    });
+
+    it('flags a positive movement in a DTA bucket without changing the amount', () => {
+      const r = ukDeferredTaxLine({
+        entityId: 'e1',
+        timingCategory: 'deductible_temporary',
+        openingDTA: new Decimal(0),
+        openingDTL: new Decimal(0),
+        currentYearTemporaryChange: new Decimal('100000'),
+        taxRate: new Decimal('0.25'),
+        dtType: 'DTA',
+        probableRecovery: true,
+        jurisdiction: Jurisdiction.UK_FRS102_S29,
+      });
+      expect(r.deferredTaxAmount.toNumber()).toBe(25_000);
+      expect(r.directionNote).toMatch(/positive movement in a DTA bucket/);
+    });
+
+    it('flags a negative movement in a DTL bucket via calculateUkDeferredTax', () => {
+      const diffs: BookTaxDifference[] = [
+        {
+          accountId: 'a1', entityId: 'e1', period: '2026-01-01',
+          bookBalance: new Decimal('50000'), taxBalance: new Decimal('100000'),
+          difference: new Decimal('-50000'), diffType: 'temporary',
+          timingCategory: 'taxable_temporary',
+        },
+      ];
+      const r = calculateUkDeferredTax(diffs, {}, {}, {});
+      expect(r.lines[0].deferredTaxAmount.toNumber()).toBe(12_500);
+      expect(r.lines[0].directionNote).toMatch(/negative movement in a DTL bucket/);
+    });
+  });
+
+  describe('remeasureUkDeferredTaxBalance', () => {
+    it('re-rates a DTL recognised at 19% to the 25% main rate', async () => {
+      const { remeasureUkDeferredTaxBalance } = await import('../uk-frs102-s29/deferred-tax.js');
+      // £100k DTL at 19% ⇒ £526,315.79 timing difference ⇒ £131,578.95 at 25%.
+      const r = remeasureUkDeferredTaxBalance(new Decimal(100_000), new Decimal('0.19'), new Decimal('0.25'));
+      expect(r.timingDifference.toNumber()).toBeCloseTo(526_315.79, 2);
+      expect(r.newBalance.toNumber()).toBeCloseTo(131_578.95, 2);
+      expect(r.adjustment.toNumber()).toBeCloseTo(31_578.95, 2);
+    });
+
+    it('produces a credit adjustment when rates fall', async () => {
+      const { remeasureUkDeferredTaxBalance } = await import('../uk-frs102-s29/deferred-tax.js');
+      const r = remeasureUkDeferredTaxBalance(new Decimal(50_000), new Decimal('0.25'), new Decimal('0.19'));
+      expect(r.adjustment.toNumber()).toBeCloseTo(-12_000, 2);
+    });
+
+    it('refuses a nil old rate instead of dividing by zero', async () => {
+      const { remeasureUkDeferredTaxBalance } = await import('../uk-frs102-s29/deferred-tax.js');
+      expect(() => remeasureUkDeferredTaxBalance(new Decimal(10_000), new Decimal(0), new Decimal('0.25'))).toThrow();
+    });
+  });
 });

@@ -340,8 +340,7 @@ export interface HandoffView {
   honesty: { note: string; notFiledByTaxPro: boolean };
 }
 
-export const handoff = {
-  view: (runId: string) => apiClient<HandoffView>(`/handoff/runs/${runId}`),
+export const handoff = {  view: (runId: string) => apiClient<HandoffView>(`/handoff/runs/${runId}`),
   handoffReady: (runId: string) =>
     apiClientSafe<{ runId: string; handoffReadyAt?: string; handoffReadyByUserId?: string; blocked?: boolean; blockers?: any[] }>(
       `/handoff/runs/${runId}/handoff-ready`, { method: 'POST' },
@@ -371,4 +370,71 @@ export const handoff = {
     }
     return { blob: await res.blob(), manifestSha256: res.headers.get('x-manifest-sha256') };
   },
+};
+
+// Enterprise intake: CSV batches → validate → suggestions → commit.
+// Server: apps/api/src/modules/intake/intake.routes.ts mounted at /api/intake.
+export const intake = {
+  batches: () => apiClient<{ batches: any[] }>('/intake/batches'),
+  batch: (id: string) => apiClient<{ batch: any; events: any[]; rowStats: any }>(`/intake/batches/${id}`),
+  rows: (id: string) => apiClient<{ rows: any[] }>(`/intake/batches/${id}/rows`),
+  upload: async (file: File, entityId: string, accountingPeriodId: string) => {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const form = new FormData();
+    form.append('file', file);
+    form.append('entityId', entityId);
+    form.append('accountingPeriodId', accountingPeriodId);
+    form.append('sourceType', 'trial_balance');
+    const res = await fetch(`${BASE_URL}/intake/batches`, { method: 'POST', headers, body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+  suggestions: (batchId: string) =>
+    apiClient<{ suggestions: any[] }>(`/intake/batches/${batchId}/suggestions`),
+  generateSuggestions: (batchId: string) =>
+    apiClient<any>(`/intake/batches/${batchId}/suggestions/generate`, { method: 'POST' }),
+  decideSuggestion: (suggestionId: string, payload: { decision: string; reason?: string }) =>
+    apiClient<any>(`/intake/suggestions/${suggestionId}/decide`, { method: 'POST', body: JSON.stringify(payload) }),
+  commit: (batchId: string) =>
+    apiClient<any>(`/intake/batches/${batchId}/commit`, { method: 'POST' }),
+  adjustments: () => apiClient<{ adjustments: any[] }>('/intake/adjustments'),
+  approveAdjustment: (id: string, reason?: string) =>
+    apiClient<any>(`/intake/adjustments/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  rejectAdjustment: (id: string, reason?: string) =>
+    apiClient<any>(`/intake/adjustments/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+};
+
+// Lineage / provenance viewer.
+// Server: apps/api/src/modules/intelligence/provenance.routes.ts at /api/provenance.
+export const provenance = {
+  result: (resultId: string) => apiClient<any>(`/provenance/results/${resultId}`),
+  document: (documentId: string) => apiClient<any>(`/provenance/documents/${documentId}`),
+  agents: () => apiClient<any[]>('/provenance/agents'),
+};
+
+// Journal workpaper exports (UK FRS 102 S29 debits/credits).
+// Server: apps/api/src/modules/export/export.routes.ts at /api/export.
+export const journalExport = {
+  json: (resultId: string) => apiClient<any>(`/export/journals/${resultId}?format=json`),
+  csv: (resultId: string) => textClient(`/export/journals/${resultId}?format=csv`),
+  jsonBlob: (resultId: string) => blobClient(`/export/journals/${resultId}?format=json`),
+  csvBlob: (resultId: string) => blobClient(`/export/journals/${resultId}?format=csv`),
+};
+
+// Billing / entitlements (read-only surfacing; enforcement is server-side).
+// Server: apps/api/src/modules/billing/billing.routes.ts at /api/billing.
+// Provider-neutral: checkout/portal return { mode: 'hosted'|'manual' }.
+export const billing = {
+  subscription: () => apiClient<any>('/billing/subscription'),
+  usage: (from?: string, to?: string) =>
+    apiClient<any>(`/billing/usage${from || to ? `?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}` : ''}`),
+  provider: () => apiClient<{ provider: string; capabilities: Record<string, boolean> }>('/billing/provider'),
+  checkout: (planCode: string, billingInterval: 'monthly' | 'annual' = 'monthly') =>
+    apiClient<any>('/billing/checkout', { method: 'POST', body: JSON.stringify({ planCode, billingInterval }) }),
+  portal: () => apiClient<any>('/billing/portal', { method: 'POST' }),
 };

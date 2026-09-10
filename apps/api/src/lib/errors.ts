@@ -28,8 +28,14 @@ export class BadRequestError extends AppError {
 }
 
 export class ForbiddenError extends AppError {
-  constructor(message = 'Forbidden') {
-    super(403, message);
+  constructor(message = 'Forbidden', details?: Record<string, unknown>) {
+    super(403, message, details);
+  }
+}
+
+export class PaymentRequiredError extends AppError {
+  constructor(message = 'Subscription limit reached', details?: Record<string, unknown>) {
+    super(402, message, details);
   }
 }
 

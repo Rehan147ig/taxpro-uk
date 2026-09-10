@@ -57,22 +57,86 @@ services:
       NODE_ENV: production
       PORT: 3001
       DATABASE_URL: postgres://${POSTGRES_USER:-taxpro}:${POSTGRES_PASSWORD:?error}@postgres:5432/${POSTGRES_DB:-taxpro}
+      # Migration connection (schema-owner role). Defaults to the runtime URL
+      # for single-role deploys — for the dual-role model (NOBYPASSRLS runtime),
+      # apply apps/api/scripts/bootstrap-roles.sql as superuser and point this
+      # at the migrations role instead.
+      DATABASE_URL_MIGRATIONS: ${DATABASE_URL_MIGRATIONS:-postgres://${POSTGRES_USER:-taxpro}:${POSTGRES_PASSWORD:?error}@postgres:5432/${POSTGRES_DB:-taxpro}}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?error}
       DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?error}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:80}
       AI_PROVIDER: ${AI_PROVIDER:-openai}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-}
+      EVE_MODEL_TIMEOUT_MS: ${EVE_MODEL_TIMEOUT_MS:-60000}
+      SUBAGENT_TIMEOUT_MS: ${SUBAGENT_TIMEOUT_MS:-120000}
+      BILLING_PROVIDER: ${BILLING_PROVIDER:-local}
+      BILLING_PROVIDER_API_KEY: ${BILLING_PROVIDER_API_KEY:-}
+      BILLING_PROVIDER_WEBHOOK_SECRET: ${BILLING_PROVIDER_WEBHOOK_SECRET:-}
+      BILLING_CURRENCY: ${BILLING_CURRENCY:-GBP}
+      TAXPRO_STORAGE_BACKEND: ${TAXPRO_STORAGE_BACKEND:-local}
+      TAXPRO_STORAGE_DIR: ${TAXPRO_STORAGE_DIR:-/app/storage}
+      RUN_WORKERS: "${RUN_WORKERS:-false}"
       RUN_MIGRATIONS: "${RUN_MIGRATIONS:-true}"
       RUN_SEED: "${RUN_SEED:-false}"
+    volumes:
+      - taxpro-storage:/app/storage
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ── Worker (dedicated background process: BullMQ consumers + Eve agents) ──
+  # Split from the API via RUN_WORKERS=false above. Scales independently;
+  # shares Postgres/Redis/storage with the API.
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: taxpro-worker
+    restart: unless-stopped
+    networks:
+      - taxpro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-taxpro}:${POSTGRES_PASSWORD:?error}@postgres:5432/${POSTGRES_DB:-taxpro}
+      DATABASE_URL_MIGRATIONS: ${DATABASE_URL_MIGRATIONS:-postgres://${POSTGRES_USER:-taxpro}:${POSTGRES_PASSWORD:?error}@postgres:5432/${POSTGRES_DB:-taxpro}}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?error}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?error}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-openai}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      EVE_MODEL_TIMEOUT_MS: ${EVE_MODEL_TIMEOUT_MS:-60000}
+      SUBAGENT_TIMEOUT_MS: ${SUBAGENT_TIMEOUT_MS:-120000}
+      TAXPRO_STORAGE_BACKEND: ${TAXPRO_STORAGE_BACKEND:-local}
+      TAXPRO_STORAGE_DIR: ${TAXPRO_STORAGE_DIR:-/app/storage}
+      RUN_WORKERS: "true"
+      RUN_MIGRATIONS: "false"
+      RUN_SEED: "false"
+    volumes:
+      - taxpro-storage:/app/storage
+    command: ["node", "apps/api/dist/worker-entry.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep worker-entry || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   # ── Web (nginx + static assets) ──
   web:
@@ -100,3 +164,7 @@ networks:
 
 volumes:
   pgdata:
+  # Source-document artefacts (TAXPRO_STORAGE_DIR). Local-backend files live
+  # here — back this volume up alongside pgdata. Object storage replaces it
+  # when TAXPRO_STORAGE_BACKEND moves off 'local'.
+  taxpro-storage:

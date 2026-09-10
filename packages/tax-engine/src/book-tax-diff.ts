@@ -1,8 +1,37 @@
 import Decimal from 'decimal.js';
-import type { TaxMapping, BookTaxDifference, TrialBalanceLine, Account, USD } from './types.js';
+import type { TaxMapping, BookTaxDifference, TrialBalanceLine, Account, USD, Jurisdiction } from './types.js';
 import { MACRS_TABLES, MACRS_LIFE_MAP, DEFAULT_TIMING_FACTORS, REVERSAL_PERIOD_MAP } from './constants.js';
+import { UK_MAIN_POOL_WDA_RATE } from './uk-frs102-s29/capital-allowances.js';
 
 type DecimalInstance = InstanceType<typeof Decimal>;
+
+/**
+ * UK fixed-asset categories relieved under CAA 2001 (AIA / full expensing /
+ * WDAs) rather than US MACRS. Always require evidence: without metadata they
+ * resolve to 'no_metadata' so callers raise a review item instead of
+ * silently assuming first-year relief.
+ */
+const UK_FIXED_ASSET_TYPES = new Set([
+  'TEMP_FIXED_ASSET_ALLOWANCE',
+  'TEMP_DEPRECIATION',
+  'TEMP_ACCELERATED_DEPRECIATION',
+]);
+
+export interface ComputeDifferencesOptions {
+  jurisdiction?: Jurisdiction | string;
+  /**
+   * First-year relief evidenced for UK fixed assets in this run.
+   * Default 'none': pool WDA rates apply. 'aia' / 'full-expensing' apply a
+   * 100% factor to year-1 fixed assets. Never assume 100% relief without
+   * evidence — the 'no_metadata' review item is the backstop.
+   */
+  ukFirstYearRelief?: 'aia' | 'full-expensing' | 'none';
+}
+
+function isUk(options?: ComputeDifferencesOptions): boolean {
+  const j = options?.jurisdiction;
+  return j === 'UK_FRS102_S29' || j === 'UK_FRS102' || j === 'UK';
+}
 
 export type DepreciationAgeSource = 'placed_in_service' | 'explicit_age' | 'assumed_first_year' | 'no_metadata';
 
@@ -30,6 +59,7 @@ export function computeBookTaxDifferences(
   mappings: Map<string, TaxMapping>,
   period: string,
   assumedAssetAgeYears: number = 1,
+  options?: ComputeDifferencesOptions,
 ): BookTaxDifference[] {
   const accountById = new Map(accounts.map((a) => [a.id, a]));
   const results: BookTaxDifference[] = [];
@@ -64,7 +94,7 @@ export function computeBookTaxDifferences(
 
     const isDeductible = mapping.timingCategory === 'deductible_temporary';
     const { ageYears, ageSource } = resolveAssetAge(tb, accountById.get(tb.accountId), period, assumedAssetAgeYears, mapping.taxAccountType);
-    const timingFactor = getTimingFactor(mapping.taxAccountType, ageYears);
+    const timingFactor = getTimingFactor(mapping.taxAccountType, ageYears, options);
     const difference: USD = tb.balance.mul(timingFactor).abs();
     const taxBalance: USD = isDeductible
       ? tb.balance.minus(difference)
@@ -89,11 +119,12 @@ export function computeBookTaxDifferences(
 }
 
 /**
- * Resolve the MACRS asset age for a single trial balance line.
+ * Resolve the asset age for a single trial balance line.
  *
- * Only MACRS depreciation categories (present in MACRS_LIFE_MAP) require
- * metadata; everything else resolves to the assumed age with source
- * 'assumed_first_year' and never triggers a review item.
+ * US MACRS depreciation categories (present in MACRS_LIFE_MAP) and UK
+ * fixed-asset categories (UK_FIXED_ASSET_TYPES) require metadata; everything
+ * else resolves to the assumed age with source 'assumed_first_year' and
+ * never triggers a review item.
  */
 function resolveAssetAge(
   tb: TrialBalanceLine,
@@ -102,23 +133,23 @@ function resolveAssetAge(
   assumedAssetAgeYears: number,
   taxAccountType: string,
 ): { ageYears: number; ageSource: DepreciationAgeSource } {
-  const isMacrs = Boolean(MACRS_LIFE_MAP[taxAccountType]);
+  const requiresEvidence = Boolean(MACRS_LIFE_MAP[taxAccountType]) || UK_FIXED_ASSET_TYPES.has(taxAccountType);
 
-  if (isMacrs && tb.placedInServiceDate) {
+  if (requiresEvidence && tb.placedInServiceDate) {
     const age = yearsSince(tb.placedInServiceDate, period);
     return { ageYears: Math.max(1, age), ageSource: 'placed_in_service' };
   }
 
-  if (isMacrs && typeof tb.assetAgeYears === 'number') {
+  if (requiresEvidence && typeof tb.assetAgeYears === 'number') {
     return { ageYears: Math.max(1, tb.assetAgeYears), ageSource: 'explicit_age' };
   }
 
-  if (isMacrs && account?.placedInServiceDate) {
+  if (requiresEvidence && account?.placedInServiceDate) {
     const age = yearsSince(account.placedInServiceDate, period);
     return { ageYears: Math.max(1, age), ageSource: 'placed_in_service' };
   }
 
-  if (isMacrs) {
+  if (requiresEvidence) {
     return { ageYears: Math.max(1, assumedAssetAgeYears), ageSource: 'no_metadata' };
   }
 
@@ -134,13 +165,28 @@ function yearsSince(placedInServiceDate: string, period: string): number {
 }
 
 /**
- * Get timing factor using MACRS tables for depreciation categories,
- * falling back to default factors for non-depreciation temporary differences.
+ * Get timing factor using MACRS tables for US depreciation categories, UK
+ * pool WDA rates for UK fixed-asset categories, falling back to default
+ * factors for non-depreciation temporary differences.
+ *
+ * UK rule: year-1 fixed assets relieve at 100% ONLY when first-year relief
+ * is evidenced (options.ukFirstYearRelief 'aia' | 'full-expensing').
+ * Otherwise the main-pool WDA rate (18%) applies — including the
+ * no-metadata case, which callers surface as a review item. Never assume
+ * 100% first-year relief without evidence.
  *
  * @param type - Tax account type
  * @param assetAgeYears - How many years since the asset was placed in service (1-based)
  */
-function getTimingFactor(type: string, assetAgeYears: number): DecimalInstance {
+function getTimingFactor(type: string, assetAgeYears: number, options?: ComputeDifferencesOptions): DecimalInstance {
+  if (isUk(options) && UK_FIXED_ASSET_TYPES.has(type)) {
+    const relief = options?.ukFirstYearRelief ?? 'none';
+    if (assetAgeYears === 1 && (relief === 'aia' || relief === 'full-expensing')) {
+      return new Decimal('1');
+    }
+    return UK_MAIN_POOL_WDA_RATE;
+  }
+
   // Check if this is a depreciation category with MACRS tables
   const life = MACRS_LIFE_MAP[type];
   if (life && MACRS_TABLES[life]) {

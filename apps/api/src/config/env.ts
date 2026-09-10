@@ -39,6 +39,14 @@ const envSchema = z.object({
   // credentials (default); object storage plugs in behind the same interface.
   TAXPRO_STORAGE_BACKEND: z.enum(['local']).default('local'),
   TAXPRO_STORAGE_DIR: z.string().default('./storage'),
+
+  // Billing provider — vendor-neutral seam. 'local' = manual/offline billing
+  // for dev + paid pilots (no SDK, no network). 'stripe' / 'dodo' are
+  // reserved names: their adapters plug behind BillingProvider later.
+  BILLING_PROVIDER: z.enum(['local', 'stripe', 'dodo']).default('local'),
+  BILLING_PROVIDER_API_KEY: z.string().optional(),
+  BILLING_PROVIDER_WEBHOOK_SECRET: z.string().optional(),
+  BILLING_CURRENCY: z.string().default('GBP'),
 });
 
 export const env = envSchema.parse(process.env);

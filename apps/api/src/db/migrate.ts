@@ -33,7 +33,9 @@ async function applyRuntimeGrants(): Promise<void> {
         'classification_patterns', 'connections', 'users', 'usage_events',
         'entity_groups', 'accounting_periods', 'tax_periods',
         'source_documents', 'mapping_proposals', 'uk_rules',
-        'workbench_jobs', 'qbo_connections', 'xero_connections'
+        'workbench_jobs', 'qbo_connections', 'xero_connections',
+        'billing_plans', 'tenant_subscriptions', 'billing_accounts',
+        'tenant_entitlements'
       ];
     BEGIN
       FOREACH t IN ARRAY full_access_tables

@@ -13,12 +13,14 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ConnectionsRouteImport } from './routes/connections'
 import { Route as DocumentsRouteImport } from './routes/documents'
 import { Route as GovernanceRouteImport } from './routes/governance'
+import { Route as IntakeRouteImport } from './routes/intake'
 import { Route as MappingRouteImport } from './routes/mapping'
 import { Route as PeriodsRouteImport } from './routes/periods'
 import { Route as ProvisionRouteImport } from './routes/provision'
 import { Route as ReviewRouteImport } from './routes/review'
 import { Route as ReviewItemsRouteImport } from './routes/review-items'
 import { Route as WorkbenchRouteImport } from './routes/workbench'
+import { Route as ProvenanceResultIdRouteImport } from './routes/provenance.$resultId'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId'
 import { Route as RunsRunIdIndexRouteImport } from './routes/runs.$runId.index'
 import { Route as RunsRunIdAuditRouteImport } from './routes/runs.$runId.audit'
@@ -43,6 +45,11 @@ const DocumentsRoute = DocumentsRouteImport.update({
 const GovernanceRoute = GovernanceRouteImport.update({
   id: '/governance',
   path: '/governance',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IntakeRoute = IntakeRouteImport.update({
+  id: '/intake',
+  path: '/intake',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MappingRoute = MappingRouteImport.update({
@@ -73,6 +80,11 @@ const ReviewItemsRoute = ReviewItemsRouteImport.update({
 const WorkbenchRoute = WorkbenchRouteImport.update({
   id: '/workbench',
   path: '/workbench',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProvenanceResultIdRoute = ProvenanceResultIdRouteImport.update({
+  id: '/provenance/$resultId',
+  path: '/provenance/$resultId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RunsRunIdRoute = RunsRunIdRouteImport.update({
@@ -106,12 +118,14 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ConnectionsRoute
   '/documents': typeof DocumentsRoute
   '/governance': typeof GovernanceRoute
+  '/intake': typeof IntakeRoute
   '/mapping': typeof MappingRoute
   '/periods': typeof PeriodsRoute
   '/provision': typeof ProvisionRoute
   '/review': typeof ReviewRoute
   '/review-items': typeof ReviewItemsRoute
   '/workbench': typeof WorkbenchRoute
+  '/provenance/$resultId': typeof ProvenanceResultIdRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/audit': typeof RunsRunIdAuditRoute
   '/runs/$runId/export': typeof RunsRunIdExportRoute
@@ -123,12 +137,14 @@ export interface FileRoutesByTo {
   '/connections': typeof ConnectionsRoute
   '/documents': typeof DocumentsRoute
   '/governance': typeof GovernanceRoute
+  '/intake': typeof IntakeRoute
   '/mapping': typeof MappingRoute
   '/periods': typeof PeriodsRoute
   '/provision': typeof ProvisionRoute
   '/review': typeof ReviewRoute
   '/review-items': typeof ReviewItemsRoute
   '/workbench': typeof WorkbenchRoute
+  '/provenance/$resultId': typeof ProvenanceResultIdRoute
   '/runs/$runId/audit': typeof RunsRunIdAuditRoute
   '/runs/$runId/export': typeof RunsRunIdExportRoute
   '/runs/$runId/findings': typeof RunsRunIdFindingsRoute
@@ -140,12 +156,14 @@ export interface FileRoutesById {
   '/connections': typeof ConnectionsRoute
   '/documents': typeof DocumentsRoute
   '/governance': typeof GovernanceRoute
+  '/intake': typeof IntakeRoute
   '/mapping': typeof MappingRoute
   '/periods': typeof PeriodsRoute
   '/provision': typeof ProvisionRoute
   '/review': typeof ReviewRoute
   '/review-items': typeof ReviewItemsRoute
   '/workbench': typeof WorkbenchRoute
+  '/provenance/$resultId': typeof ProvenanceResultIdRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/audit': typeof RunsRunIdAuditRoute
   '/runs/$runId/export': typeof RunsRunIdExportRoute
@@ -159,12 +177,14 @@ export interface FileRouteTypes {
     | '/connections'
     | '/documents'
     | '/governance'
+    | '/intake'
     | '/mapping'
     | '/periods'
     | '/provision'
     | '/review'
     | '/review-items'
     | '/workbench'
+    | '/provenance/$resultId'
     | '/runs/$runId'
     | '/runs/$runId/audit'
     | '/runs/$runId/export'
@@ -176,12 +196,14 @@ export interface FileRouteTypes {
     | '/connections'
     | '/documents'
     | '/governance'
+    | '/intake'
     | '/mapping'
     | '/periods'
     | '/provision'
     | '/review'
     | '/review-items'
     | '/workbench'
+    | '/provenance/$resultId'
     | '/runs/$runId/audit'
     | '/runs/$runId/export'
     | '/runs/$runId/findings'
@@ -192,12 +214,14 @@ export interface FileRouteTypes {
     | '/connections'
     | '/documents'
     | '/governance'
+    | '/intake'
     | '/mapping'
     | '/periods'
     | '/provision'
     | '/review'
     | '/review-items'
     | '/workbench'
+    | '/provenance/$resultId'
     | '/runs/$runId'
     | '/runs/$runId/audit'
     | '/runs/$runId/export'
@@ -210,12 +234,14 @@ export interface RootRouteChildren {
   ConnectionsRoute: typeof ConnectionsRoute
   DocumentsRoute: typeof DocumentsRoute
   GovernanceRoute: typeof GovernanceRoute
+  IntakeRoute: typeof IntakeRoute
   MappingRoute: typeof MappingRoute
   PeriodsRoute: typeof PeriodsRoute
   ProvisionRoute: typeof ProvisionRoute
   ReviewRoute: typeof ReviewRoute
   ReviewItemsRoute: typeof ReviewItemsRoute
   WorkbenchRoute: typeof WorkbenchRoute
+  ProvenanceResultIdRoute: typeof ProvenanceResultIdRoute
   RunsRunIdRoute: typeof RunsRunIdRouteWithChildren
 }
 
@@ -247,6 +273,13 @@ declare module '@tanstack/react-router' {
       path: '/governance'
       fullPath: '/governance'
       preLoaderRoute: typeof GovernanceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/intake': {
+      id: '/intake'
+      path: '/intake'
+      fullPath: '/intake'
+      preLoaderRoute: typeof IntakeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/mapping': {
@@ -289,6 +322,13 @@ declare module '@tanstack/react-router' {
       path: '/workbench'
       fullPath: '/workbench'
       preLoaderRoute: typeof WorkbenchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/provenance/$resultId': {
+      id: '/provenance/$resultId'
+      path: '/provenance/$resultId'
+      fullPath: '/provenance/$resultId'
+      preLoaderRoute: typeof ProvenanceResultIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/runs/$runId': {
@@ -352,12 +392,14 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectionsRoute: ConnectionsRoute,
   DocumentsRoute: DocumentsRoute,
   GovernanceRoute: GovernanceRoute,
+  IntakeRoute: IntakeRoute,
   MappingRoute: MappingRoute,
   PeriodsRoute: PeriodsRoute,
   ProvisionRoute: ProvisionRoute,
   ReviewRoute: ReviewRoute,
   ReviewItemsRoute: ReviewItemsRoute,
   WorkbenchRoute: WorkbenchRoute,
+  ProvenanceResultIdRoute: ProvenanceResultIdRoute,
   RunsRunIdRoute: RunsRunIdRouteWithChildren,
 }
 export const routeTree = rootRouteImport

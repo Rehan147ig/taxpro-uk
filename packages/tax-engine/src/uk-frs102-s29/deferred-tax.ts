@@ -29,7 +29,6 @@ export function ukDeferredTaxLine(input: DeferredTaxInput): DeferredTaxLine {
     : new Decimal(1);
   const grossDeferred: USD = input.currentYearTemporaryChange.abs().mul(input.taxRate);
   const deferredTaxAmount: USD = grossDeferred.mul(discountFactor);
-
   const openingBalance: USD = input.dtType === 'DTA' ? input.openingDTA : input.openingDTL;
   const closingBalance: USD = openingBalance.plus(deferredTaxAmount);
 
@@ -44,7 +43,41 @@ export function ukDeferredTaxLine(input: DeferredTaxInput): DeferredTaxLine {
     reversals: new Decimal(0),
     closingBalance,
     dtType: input.dtType,
+    directionNote: directionNoteFor(input.currentYearTemporaryChange, input.dtType),
   };
+}
+
+/**
+ * Remeasure a recognised deferred-tax balance when the substantively-enacted
+ * rate changes (FRS 102 29.27 disclosure). The underlying timing difference
+ * is recovered from the old rate, re-rated, and the P&L adjustment returned.
+ */
+export function remeasureUkDeferredTaxBalance(
+  balance: USD,
+  oldRate: TaxRate,
+  newRate: TaxRate,
+): { timingDifference: USD; newBalance: USD; adjustment: USD } {
+  validateRate('oldRate', oldRate);
+  validateRate('newRate', newRate);
+  if (oldRate.isZero()) {
+    throw new Error('Cannot remeasure a balance recognised at a nil rate — re-establish the underlying timing difference first');
+  }
+  const timingDifference = balance.div(oldRate);
+  const newBalance = timingDifference.mul(newRate);
+  return { timingDifference, newBalance, adjustment: newBalance.minus(balance) };
+}
+
+/**
+ * Magnitude recognition with direction honesty: deductible (DTA) buckets
+ * expect non-positive differences, taxable (DTL) buckets non-negative.
+ * Returns a reviewer note when the sign contradicts the bucket, else undefined.
+ * Amounts are unaffected — recognition stays by magnitude.
+ */
+export function directionNoteFor(difference: USD, dtType: 'DTA' | 'DTL'): string | undefined {
+  if (difference.isZero()) return undefined;
+  const contradicts = dtType === 'DTA' ? difference.isPositive() : difference.isNegative();
+  if (!contradicts) return undefined;
+  return `Unexpected ${difference.isPositive() ? 'positive' : 'negative'} movement in a ${dtType} bucket — recognised by magnitude; confirm the mapping and timing direction`;
 }
 
 export function calculateUkDeferredTax(
@@ -103,6 +136,7 @@ export function calculateUkDeferredTax(
       reversals: new Decimal(0),
       closingBalance,
       dtType,
+      directionNote: directionNoteFor(diff.difference, dtType),
     });
   }
 

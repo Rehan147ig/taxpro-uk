@@ -125,6 +125,7 @@ export function runProvisionMath(input: ProvisionMathInput, jurisdiction: Jurisd
     permanentDifferences,
     taxCredits: currentTax.taxCredits,
     otherAdjustments: etrAdjustmentsForMarginalRelief(currentTax),
+    jurisdiction,
   });
 
   const journalEntries = engine.generateJournalEntries(

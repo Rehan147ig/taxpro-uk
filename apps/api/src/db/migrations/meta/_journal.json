@@ -148,6 +148,20 @@
                         "when":  1790003000000,
                         "tag":  "adjustment_review",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  21,
+                        "version":  "0021_billing_run_batch_linkage",
+                        "when":  1790004000000,
+                        "tag":  "provision_run_batch_linkage",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  22,
+                        "version":  "0022_billing_sprint1_2",
+                        "when":  1790005000000,
+                        "tag":  "billing_sprint1_2",
+                        "breakpoints":  true
                     }
                 ]
 }

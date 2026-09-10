@@ -1,12 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { provision, connections as connApi, mappings as mappingApi, apiClient } from '../api/client';
+import { provision, connections as connApi, mappings as mappingApi, apiClient, billing } from '../api/client';
 
 const gbp = (n: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(n);
+
+interface EntitlementState {
+  planName: string;
+  includedRunsPerMonth: number;
+  remainingRuns: number;
+  decision: string;
+  message: string;
+  upgradeRequired: boolean;
+}
 
 export default function Dashboard() {
   const [stats, setStats] = useState({ connections: 0, mappings: 0, provisions: 0 });
   const [runStatus, setRunStatus] = useState({ needsReview: 0, awaitingApproval: 0, finalized: 0, locked: 0, total: 0 });
+  const [entitlement, setEntitlement] = useState<EntitlementState | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
@@ -15,6 +25,23 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadStats();
+    // Entitlement surfacing only — enforcement lives server-side. Silent on
+    // failure so a down billing API never breaks the dashboard.
+    billing.subscription()
+      .then((res: any) => {
+        const e = res?.entitlement;
+        const s = res?.subscription;
+        if (!e) return;
+        setEntitlement({
+          planName: String(s?.planName ?? e.planName ?? 'Pilot'),
+          includedRunsPerMonth: Number(s?.includedRunsPerMonth ?? e.includedRunsPerMonth ?? 1),
+          remainingRuns: Number(e.remainingRuns ?? 0),
+          decision: String(e.decision ?? ''),
+          message: String(e.message ?? ''),
+          upgradeRequired: Boolean(e.upgradeRequired),
+        });
+      })
+      .catch(() => null);
   }, []);
 
   function loadStats() {
@@ -97,6 +124,18 @@ export default function Dashboard() {
       )}
       {loadError && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-card p-4 text-xs font-medium">{loadError}</div>
+      )}
+
+      {entitlement && (
+        <div className={`rounded-card border p-4 text-xs font-medium shadow-sm ${entitlement.upgradeRequired ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-[#E8F7F0] border-[#10B981] text-[#0A192F]'}`}>
+          <span className="font-semibold">{entitlement.planName} plan</span>
+          {' — '}{entitlement.decision === 'free_trial'
+            ? 'your first run this month is free.'
+            : `${entitlement.remainingRuns} of ${entitlement.includedRunsPerMonth} included runs remaining this month.`}
+          {entitlement.upgradeRequired && (
+            <span className="ml-2">Further runs bill as overage — contact sales to add capacity.</span>
+          )}
+        </div>
       )}
 
       <div className="grid grid-cols-3 gap-5">

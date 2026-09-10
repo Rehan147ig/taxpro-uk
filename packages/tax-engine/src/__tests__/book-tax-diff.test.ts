@@ -191,4 +191,61 @@ describe('computeBookTaxDifferences', () => {
     expect(results[0].depreciationAgeSource).toBe('assumed_first_year');
     expect(results[0].difference.abs().toNumber()).toBe(10_000);
   });
+
+  it('flags UK fixed-asset categories without metadata (no silent first-year relief)', () => {
+    const results = computeBookTaxDifferences(
+      [{ entityId: 'e1', accountId: 'a1', period: '2026-01-01', balance: new Decimal('100000') }],
+      [account],
+      new Map([['a1', { ...defaultMapping, taxAccountType: 'TEMP_FIXED_ASSET_ALLOWANCE' }]]),
+      '2026-01-01',
+    );
+    expect(results[0].depreciationAgeSource).toBe('no_metadata');
+  });
+
+  it('applies main-pool WDA (18%) to UK fixed assets by default — never assumed 100%', () => {
+    const results = computeBookTaxDifferences(
+      [{ entityId: 'e1', accountId: 'a1', period: '2026-01-01', balance: new Decimal('100000') }],
+      [account],
+      new Map([['a1', { ...defaultMapping, taxAccountType: 'TEMP_FIXED_ASSET_ALLOWANCE' }]]),
+      '2026-01-01', 1,
+      { jurisdiction: 'UK_FRS102_S29' },
+    );
+    // £100k × 18% = £18k timing difference (not £100k).
+    expect(results[0].difference.toNumber()).toBe(18_000);
+  });
+
+  it('applies 100% factor to year-1 UK fixed assets only with evidenced first-year relief', () => {
+    for (const relief of ['aia', 'full-expensing'] as const) {
+      const results = computeBookTaxDifferences(
+        [{ entityId: 'e1', accountId: 'a1', period: '2026-01-01', balance: new Decimal('100000'), placedInServiceDate: '2026-03-01' }],
+        [account],
+        new Map([['a1', { ...defaultMapping, taxAccountType: 'TEMP_FIXED_ASSET_ALLOWANCE' }]]),
+        '2026-01-01', 1,
+        { jurisdiction: 'UK_FRS102_S29', ukFirstYearRelief: relief },
+      );
+      expect(results[0].difference.toNumber()).toBe(100_000);
+    }
+  });
+
+  it('keeps WDA rates for older UK fixed assets even with first-year relief evidenced', () => {
+    const results = computeBookTaxDifferences(
+      [{ entityId: 'e1', accountId: 'a1', period: '2026-01-01', balance: new Decimal('100000'), placedInServiceDate: '2024-01-01' }],
+      [account],
+      new Map([['a1', { ...defaultMapping, taxAccountType: 'TEMP_FIXED_ASSET_ALLOWANCE' }]]),
+      '2026-01-01', 1,
+      { jurisdiction: 'UK_FRS102_S29', ukFirstYearRelief: 'aia' },
+    );
+    expect(results[0].assetAgeYears).toBe(3);
+    expect(results[0].difference.toNumber()).toBe(18_000);
+  });
+
+  it('leaves US MACRS behaviour untouched when no jurisdiction is passed', () => {
+    const results = computeBookTaxDifferences(
+      [{ entityId: 'e1', accountId: 'a1', period: '2026-01-01', balance: new Decimal('100000') }],
+      [account],
+      new Map([['a1', defaultMapping]]),
+      '2026-01-01', 1,
+    );
+    expect(results[0].difference.toNumber()).toBe(20_000);
+  });
 });

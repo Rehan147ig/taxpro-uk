@@ -27,3 +27,5 @@ export { reviewerFeedbackEvents } from './feedback.js';
 export { taxAdjustments } from './tax-adjustments.js';
 export { dataLineageEdges } from './lineage.js';
 export { agentEvents } from './agent-events.js';
+export { usageEvents } from './usage-events.js';
+export { billingPlans, tenantSubscriptions, billingAccounts, tenantEntitlements } from './billing.js';
