@@ -82,20 +82,23 @@ export async function recordUsageEvent(
   };
 
   // Idempotent insert: retries / repeated lifecycle calls are no-ops.
+  // Two layers (either suffices alone):
+  //  1. Explicit pre-check — the common retry path, no constraint needed.
+  //  2. Bare ON CONFLICT DO NOTHING (no inference target, so it is valid
+  //     against full AND partial unique indexes) + 23505 catch for races.
+  // Never use ON CONFLICT (cols) inference here: partial indexes do not
+  // satisfy inference and Postgres raises 42P10 instead of inserting.
   // Test doubles may not implement onConflictDoNothing — fall back gracefully.
   try {
+    if (await hasUsageEvent(tx, input.tenantId, input.provisionRunId, eventType)) {
+      return { inserted: false, duplicate: true };
+    }
     const insert: any = (tx as any).insert(usageEvents).values(row);
     if (insert && typeof insert.onConflictDoNothing === 'function') {
-      await insert.onConflictDoNothing({
-        target: [usageEvents.tenantId, usageEvents.provisionRunId, usageEvents.eventType],
-      });
-      // If the driver returns rowCount we could detect duplicates precisely;
-      // drizzle's onConflictDoNothing resolves without rows, so callers that
-      // need certainty should pre-check via hasUsageEvent(). Treat as inserted
-      // here — hasUsageEvent() is the authoritative duplicate check.
-      return { inserted: true, duplicate: false };
+      await insert.onConflictDoNothing();
+    } else {
+      await insert;
     }
-    await insert;
     return { inserted: true, duplicate: false };
   } catch (err: any) {
     // Unique violation (SQLSTATE 23505) = duplicate billable event. Swallow:

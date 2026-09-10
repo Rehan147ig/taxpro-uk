@@ -80,6 +80,11 @@ describe('recordUsageEvent', () => {
 
   it('treats unique violations as duplicate (no double charge)', async () => {
     const dupTx = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [] }),
+        }),
+      }),
       insert: () => ({
         values: () => ({
           onConflictDoNothing: async () => {
@@ -93,6 +98,27 @@ describe('recordUsageEvent', () => {
     const res = await recordUsageEvent(dupTx as any, { tenantId: 't1', provisionRunId: 'r1' });
     expect(res.duplicate).toBe(true);
     expect(res.inserted).toBe(false);
+  });
+
+  it('short-circuits when the billable event already exists (no second insert)', async () => {
+    let inserts = 0;
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => [{ id: 'existing' }] }),
+        }),
+      }),
+      insert: () => ({
+        values: () => {
+          inserts++;
+          return { onConflictDoNothing: async () => [] };
+        },
+      }),
+    };
+    const res = await recordUsageEvent(tx as any, { tenantId: 't1', provisionRunId: 'r1' });
+    expect(res.duplicate).toBe(true);
+    expect(res.inserted).toBe(false);
+    expect(inserts).toBe(0);
   });
 
   it('builds deterministic idempotency keys', () => {

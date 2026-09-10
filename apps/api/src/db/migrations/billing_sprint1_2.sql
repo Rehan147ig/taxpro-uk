@@ -48,11 +48,11 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'uq_usage_events_tenant_run_event'
   ) THEN
-    -- Only enforce uniqueness where a run is attached; legacy rows with
-    -- NULL provision_run_id keep the idempotency-key uniqueness instead.
+    -- Full (non-partial) index: NULL provision_run_id rows never conflict in
+    -- Postgres, and a full index (unlike a partial one) satisfies
+    -- ON CONFLICT inference should callers ever target these columns.
     CREATE UNIQUE INDEX uq_usage_events_tenant_run_event
-      ON usage_events (tenant_id, provision_run_id, event_type)
-      WHERE provision_run_id IS NOT NULL;
+      ON usage_events (tenant_id, provision_run_id, event_type);
   END IF;
 END $$;
 
