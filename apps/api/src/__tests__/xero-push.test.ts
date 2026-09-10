@@ -64,6 +64,10 @@ function mockXeroJournalsOk(id = 'mj-123') {
 }
 
 beforeAll(async () => {
+  // Routes read Xero credentials per request: dummy values exercise the
+  // push logic with fully mocked HTTP (no real Xero calls).
+  process.env.XERO_CLIENT_ID = 'test-client-id';
+  process.env.XERO_CLIENT_SECRET = 'test-client-secret';
   for (const [tid, uid, role] of [
     [TENANT_A, USER_PARTNER, 'partner'],
     [TENANT_A, USER_PREPARER, 'preparer'],
@@ -92,7 +96,11 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => { vi.unstubAllGlobals(); });
+afterAll(() => {
+  vi.unstubAllGlobals();
+  delete process.env.XERO_CLIENT_ID;
+  delete process.env.XERO_CLIENT_SECRET;
+});
 
 describe('POST /api/xero/push-journals/:runId', () => {
   it('refuses non-partner roles (RBAC)', async () => {

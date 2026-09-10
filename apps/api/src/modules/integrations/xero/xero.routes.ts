@@ -19,9 +19,15 @@ import { encryptToken, decryptToken, buildAuthUrl, exchangeCode, refreshTokens, 
 export const xeroRoutes = new Hono();
 xeroRoutes.use('*', authMiddleware);
 
-const XERO_CLIENT_ID = process.env.XERO_CLIENT_ID ?? '';
-const XERO_CLIENT_SECRET = process.env.XERO_CLIENT_SECRET ?? '';
-const XERO_REDIRECT_URI = process.env.XERO_REDIRECT_URI ?? 'http://localhost:3000/api/xero/callback';
+// Read per request (not at module load): supports credential rotation
+// without a restart and lets tests inject dummy credentials.
+function xeroCreds() {
+  return {
+    clientId: process.env.XERO_CLIENT_ID ?? '',
+    clientSecret: process.env.XERO_CLIENT_SECRET ?? '',
+    redirectUri: process.env.XERO_REDIRECT_URI ?? 'http://localhost:3000/api/xero/callback',
+  };
+}
 
 const connectSchema = z.object({
   code: z.string(),
@@ -32,10 +38,11 @@ const connectSchema = z.object({
 
 xeroRoutes.post('/auth-url', async (c) => {
   const user = getUser(c);
-  if (!XERO_CLIENT_ID) throw new BadRequestError('XERO_CLIENT_ID not configured on the server');
+  const { clientId, redirectUri } = xeroCreds();
+  if (!clientId) throw new BadRequestError('XERO_CLIENT_ID not configured on the server');
   const { url, codeVerifier, state } = buildAuthUrl({
-    clientId: XERO_CLIENT_ID,
-    redirectUri: XERO_REDIRECT_URI,
+    clientId,
+    redirectUri,
   });
   // code_verifier must survive the browser round-trip; it is returned to the
   // client and posted back with the callback. (MVP compromise — in production
@@ -47,9 +54,10 @@ xeroRoutes.post('/callback', zValidator('json', connectSchema), async (c) => {
   const user = getUser(c);
   const { code, codeVerifier } = c.req.valid('json');
   if (!codeVerifier) throw new BadRequestError('codeVerifier is required (request a fresh auth-url)');
-  if (!XERO_CLIENT_ID || !XERO_CLIENT_SECRET) throw new BadRequestError('Xero app credentials not configured');
+  const { clientId, clientSecret, redirectUri } = xeroCreds();
+  if (!clientId || !clientSecret) throw new BadRequestError('Xero app credentials not configured');
 
-  const tokens = await exchangeCode({ code, clientId: XERO_CLIENT_ID, clientSecret: XERO_CLIENT_SECRET, redirectUri: XERO_REDIRECT_URI, codeVerifier });
+  const tokens = await exchangeCode({ code, clientId, clientSecret, redirectUri, codeVerifier });
   const orgs = await listOrganisations(tokens.accessToken);
   if (orgs.length === 0) throw new BadRequestError('No Xero organisations connected to this app');
 
@@ -90,7 +98,8 @@ xeroRoutes.post('/connections/:id/sync', zValidator('json', z.object({
   const user = getUser(c);
   const { periodStart, periodEnd, entityName } = c.req.valid('json');
   const connId = c.req.param('id');
-  if (!XERO_CLIENT_ID || !XERO_CLIENT_SECRET) throw new BadRequestError('Xero app credentials not configured');
+  const { clientId, clientSecret } = xeroCreds();
+  if (!clientId || !clientSecret) throw new BadRequestError('Xero app credentials not configured');
 
   return withTenantContext(user.tenantId, async (tx) => {
     const [conn] = await tx.select().from(xeroConnections)
@@ -99,7 +108,7 @@ xeroRoutes.post('/connections/:id/sync', zValidator('json', z.object({
 
     let accessToken = decryptToken(conn.accessToken);
     if (new Date(conn.tokenExpiresAt).getTime() < Date.now() + 60_000) {
-      const refreshed = await refreshTokens({ refreshToken: decryptToken(conn.refreshToken), clientId: XERO_CLIENT_ID, clientSecret: XERO_CLIENT_SECRET });
+      const refreshed = await refreshTokens({ refreshToken: decryptToken(conn.refreshToken), clientId, clientSecret });
       accessToken = refreshed.accessToken;
       await tx.update(xeroConnections).set({
         accessToken: encryptToken(refreshed.accessToken),
@@ -198,7 +207,8 @@ xeroRoutes.post('/push-journals/:runId',
     const user = getUser(c);
     const runId = c.req.param('runId');
     const { connectionId, accountCodes, narration } = c.req.valid('json');
-    if (!XERO_CLIENT_ID || !XERO_CLIENT_SECRET) throw new BadRequestError('Xero app credentials not configured');
+    const { clientId, clientSecret } = xeroCreds();
+    if (!clientId || !clientSecret) throw new BadRequestError('Xero app credentials not configured');
 
     return withTenantContext(user.tenantId, async (tx) => {
       const [run] = await tx.select().from(provisionRuns)
@@ -244,7 +254,7 @@ xeroRoutes.post('/push-journals/:runId',
       if (!conn) throw new BadRequestError('Xero connection not found');
 
       const storeRefreshed = async () => {
-        const refreshed = await refreshTokens({ refreshToken: decryptToken(conn.refreshToken), clientId: XERO_CLIENT_ID, clientSecret: XERO_CLIENT_SECRET });
+        const refreshed = await refreshTokens({ refreshToken: decryptToken(conn.refreshToken), clientId, clientSecret });
         await tx.update(xeroConnections).set({
           accessToken: encryptToken(refreshed.accessToken),
           refreshToken: encryptToken(refreshed.refreshToken),
