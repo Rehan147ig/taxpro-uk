@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Hono } from 'hono';
 import jwt from 'jsonwebtoken';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import crypto from 'crypto';
 import { withTenantContext } from '../config/db.js';
 import { env } from '../config/env.js';
@@ -486,6 +486,12 @@ describe('Phase D — record external filing (bookkeeping, never a claim)', () =
 
   it('tenant B sees zero filings via RLS and cannot read A’s handoff surface', async () => {
     await withTenantContext(TENANT_B, async (tx) => {
+      // Assert database-level isolation as the NOBYPASSRLS runtime role.
+      // Test harnesses (including CI) connect as a superuser, which bypasses
+      // RLS policies entirely — so assume the runtime role for this one
+      // assertion. SET LOCAL is scoped to this transaction and reverts
+      // automatically; app.tenant_id was already set by withTenantContext.
+      await tx.execute(sql`SET LOCAL ROLE taxpro_app`);
       const rows = await tx.select().from(externalFilings).where(eq(externalFilings.runId, runId));
       expect(rows).toHaveLength(0);
     });
