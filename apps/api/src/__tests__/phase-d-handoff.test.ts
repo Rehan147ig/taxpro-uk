@@ -509,7 +509,9 @@ describe('Phase D — record external filing (bookkeeping, never a claim)', () =
         manifestChecksum: manifestSha,
       }),
     });
-    expect([400, 404]).toContain(filing.status);
+    // Any denial counts: 404 (run hidden), 403 (app-level cross-tenant
+    // guard), or 400 (validation). What must never happen is 2xx.
+    expect([400, 403, 404]).toContain(filing.status);
   });
 
   it('read-only roles are refused for handoff actions', async () => {
