@@ -76,13 +76,14 @@ beforeAll(async () => {
   }
   await withTenantContext(TENANT_A, async (tx) => {
     await tx.insert(entities).values({ id: ENTITY_A, tenantId: TENANT_A, externalId: 'XPUSH-ENT', name: 'XPush Ltd', type: 'Limited Company', currency: 'GBP', taxJurisdiction: 'UK_FRS102' }).onConflictDoNothing();
+    // Runs before results: provision_results.provision_run_id is a real FK.
+    await tx.insert(provisionRuns).values({ id: RUN_LOCKED, tenantId: TENANT_A, period: '2026-01-01', endPeriod: '2026-12-31', entityId: ENTITY_A, status: 'locked', approvalStatus: 'approved', resultId: RESULT_LOCKED }).onConflictDoNothing();
+    await tx.insert(provisionRuns).values({ id: RUN_OPEN, tenantId: TENANT_A, period: '2026-01-01', entityId: ENTITY_A, status: 'needs_review', approvalStatus: 'pending' }).onConflictDoNothing();
     await tx.insert(provisionResults).values({
       id: RESULT_LOCKED, tenantId: TENANT_A, provisionRunId: RUN_LOCKED, period: '2026-01-01',
       status: 'draft', currentTaxExpense: '36000', deferredTaxExpense: '0', totalTaxExpense: '36000',
       bookIncome: '125000', taxPayable: '36000', detail: null,
     }).onConflictDoNothing();
-    await tx.insert(provisionRuns).values({ id: RUN_LOCKED, tenantId: TENANT_A, period: '2026-01-01', endPeriod: '2026-12-31', entityId: ENTITY_A, status: 'locked', approvalStatus: 'approved', resultId: RESULT_LOCKED }).onConflictDoNothing();
-    await tx.insert(provisionRuns).values({ id: RUN_OPEN, tenantId: TENANT_A, period: '2026-01-01', entityId: ENTITY_A, status: 'needs_review', approvalStatus: 'pending' }).onConflictDoNothing();
     await tx.insert(xeroConnections).values({
       id: CONN_A, tenantId: TENANT_A, label: 'Xero — XPush', xeroTenantId: 'xero-org-1',
       accessToken: encryptToken('valid-access'), refreshToken: encryptToken('valid-refresh'),
