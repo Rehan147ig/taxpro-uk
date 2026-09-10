@@ -417,6 +417,37 @@ export const provenance = {
   agents: () => apiClient<any[]>('/provenance/agents'),
 };
 
+// Xero integration: OAuth connections (pull TB) + manual-journal push.
+// Server: apps/api/src/modules/integrations/xero/xero.routes.ts at /api/xero.
+// Journals push as DRAFT to locked runs only; partner/admin roles enforced
+// server-side. AccountCodes are supplied explicitly — never guessed.
+export interface XeroAccountCodes {
+  currentTaxExpense: string;
+  corporationTaxPayable: string;
+  deferredTaxExpense: string;
+  deferredTaxProvision: string;
+  deferredTaxAsset: string;
+}
+
+export const xero = {
+  connections: () => apiClient<Array<{ id: string; label: string; xeroTenantId: string; syncStatus: string; lastSyncedAt: string | null }>>('/xero/connections'),
+  pushJournals: (runId: string, payload: { connectionId: string; accountCodes: XeroAccountCodes; narration?: string }) =>
+    apiClient<{ runId: string; manualJournalId: string; status: string; lines: number; totalDebit: number; totalCredit: number }>(
+      `/xero/push-journals/${runId}`, { method: 'POST', body: JSON.stringify(payload) },
+    ),
+};
+// Demo scenarios (Phase E): balanced UK synthetic tenants for pilots.
+// Server: apps/api/src/modules/demo/demo.routes.ts + scenarios.ts.
+export const demo = {
+  seedGreggs: () =>
+    apiClient<{ message: string; summary: { totalIncome: number; totalExpenses: number; pbt: number } }>('/demo/seed', { method: 'POST' }),
+  scenarios: () => apiClient<{ scenarios: Array<{ id: string; entityName: string; narrative: string; highlights: string[]; expectedOutcome: string; loaded: boolean }> }>('/demo/scenarios'),
+  switchScenario: (scenario: string, reset = false) =>
+    apiClient<{ scenario: string; alreadyLoaded: boolean; entity: { id: string; name: string }; expectedOutcome: string; nextStep: string }>(
+      '/demo/switch-scenario', { method: 'POST', body: JSON.stringify({ scenario, reset }) },
+    ),
+};
+
 // Journal workpaper exports (UK FRS 102 S29 debits/credits).
 // Server: apps/api/src/modules/export/export.routes.ts at /api/export.
 export const journalExport = {

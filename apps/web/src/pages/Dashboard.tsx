@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { provision, connections as connApi, mappings as mappingApi, apiClient, billing } from '../api/client';
+import { provision, connections as connApi, mappings as mappingApi, apiClient, billing, demo } from '../api/client';
+import UkTerm from '../components/UkTerm';
 
 const gbp = (n: number) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(n);
 
@@ -80,6 +81,21 @@ export default function Dashboard() {
       loadStats();
     } catch (err: any) {
       setSeedError(err.message || 'Failed to load demo data');
+    } finally {
+      setSeeding(false);
+    }
+  }
+
+  async function loadScenario(scenario: string) {
+    setSeeding(true);
+    setSeedError(null);
+    setSeedResult(null);
+    try {
+      const res = await demo.switchScenario(scenario);
+      setSeedResult(res.alreadyLoaded ? `${res.entity.name} is already loaded.` : `${res.entity.name} loaded. ${res.expectedOutcome}`);
+      loadStats();
+    } catch (err: any) {
+      setSeedError(err.message || 'Failed to load scenario');
     } finally {
       setSeeding(false);
     }
@@ -165,30 +181,92 @@ export default function Dashboard() {
 
       {runStatus.total === 0 && !loading && (
         <div className="bg-white rounded-card border border-gray-200 p-8 text-center shadow-sm">
-          <p className="text-sm text-gray-500 mb-3">No provision runs generated yet.</p>
-          <Link to="/provision" className="inline-block px-4 py-2 bg-[#0A192F] text-white rounded-button text-xs font-medium hover:bg-[#112240] transition-colors">
-            Run First Provision →
-          </Link>
+          <p className="text-sm text-gray-500 mb-1">No provision runs generated yet.</p>
+          <p className="text-xs text-gray-400 mb-4">Start with a balanced UK scenario — each one calculates cleanly end to end:</p>
+          <div className="flex flex-wrap gap-2 justify-center">
+            <Link to="/provision" className="inline-block px-4 py-2 bg-[#0A192F] text-white rounded-button text-xs font-medium hover:bg-[#112240] transition-colors">
+              Run First Provision →
+            </Link>
+            <button onClick={() => loadScenario('apex-marginal-relief')} disabled={seeding} className="px-4 py-2 border border-gray-300 rounded-button text-xs font-medium hover:bg-gray-50 disabled:opacity-50 transition-colors">
+              Load Marginal Relief Scenario
+            </button>
+            <button onClick={() => loadScenario('biotech-rd-loss')} disabled={seeding} className="px-4 py-2 border border-gray-300 rounded-button text-xs font-medium hover:bg-gray-50 disabled:opacity-50 transition-colors">
+              Load R&D Loss Scenario
+            </button>
+            <button onClick={() => loadScenario('cotswold-capex')} disabled={seeding} className="px-4 py-2 border border-gray-300 rounded-button text-xs font-medium hover:bg-gray-50 disabled:opacity-50 transition-colors">
+              Load Capital Allowances Scenario
+            </button>
+          </div>
         </div>
       )}
 
       <div className="bg-white rounded-card border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-lg font-serif font-semibold text-[#0A192F] mb-4 tracking-tight">Provision Workflow Checklist</h3>
-        <ol className="list-decimal list-inside text-xs text-gray-600 space-y-2.5">
-          <li className={stats.connections > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
-            Connect an ERP (NetSuite/Xero) or upload a trial balance CSV
-          </li>
-          <li className={stats.mappings > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
-            Run AI auto-mapping and approve proposed classifications
-          </li>
-          <li className={stats.provisions > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
-            Execute UK FRS 102 tax engine calculation
-          </li>
-          <li className={runStatus.locked > 0 ? 'line-through text-[#10B981] font-medium' : ''}>
-            Partner sign-off, lock provision run, and export workpapers
-          </li>
+        <div className="flex items-baseline justify-between mb-4">
+          <h3 className="text-lg font-serif font-semibold text-[#0A192F] tracking-tight">Provision Workflow Checklist</h3>
+          <span className="text-[11px] text-gray-500 font-sans">
+            {[stats.connections > 0 || stats.provisions > 0, stats.mappings > 0, stats.provisions > 0, runStatus.locked > 0, runStatus.locked > 0].filter(Boolean).length} of 5 complete
+          </span>
+        </div>
+        <ol className="space-y-3">
+          <TourStep
+            done={stats.connections > 0 || stats.provisions > 0}
+            title="1. Ingest Data"
+            to="/connections"
+            cta="Connect or upload →"
+          >
+            Upload a CSV trial balance or connect Xero/QBO. Or load a demo scenario above.
+          </TourStep>
+          <TourStep
+            done={stats.mappings > 0}
+            title="2. Review AI Classifications"
+            to="/mapping"
+            cta="Review mappings →"
+          >
+            Approve or reject suggested tax treatments. Unmapped and low-confidence accounts land in the review queue.
+          </TourStep>
+          <TourStep
+            done={stats.provisions > 0}
+            title="3. Run Workbench Provision"
+            to="/workbench"
+            cta="Open Workbench →"
+          >
+            Deterministic FRS 102 math — <UkTerm term="s29-timing" />, <UkTerm term="marginal-relief" />, <UkTerm term="hmrc-bands" />. Resolve every flagged review item.
+          </TourStep>
+          <TourStep
+            done={runStatus.locked > 0}
+            title="4. Partner Sign-Off & Lock"
+            to="/review"
+            cta="Open review queue →"
+          >
+            Maker-checker segregation: the partner who approves can never be the preparer who submitted. Lock freezes the run.
+          </TourStep>
+          <TourStep
+            done={runStatus.locked > 0}
+            title="5. Export Workpapers"
+            to="/review"
+            cta="Export from a locked run →"
+          >
+            Download the deterministic ZIP package and journal entries from any locked run. Push journals to Xero as DRAFT.
+          </TourStep>
         </ol>
       </div>
     </div>
+  );
+}
+
+function TourStep({ done, title, to, cta, children }: { done: boolean; title: string; to: string; cta: string; children: React.ReactNode }) {
+  return (
+    <li className="flex gap-3 items-start">
+      <span className={`mt-0.5 inline-flex w-5 h-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${done ? 'bg-[#10B981] text-white' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}>
+        {done ? '✓' : '·'}
+      </span>
+      <div className="min-w-0">
+        <p className="text-xs font-semibold text-[#0A192F]">
+          {title}{' '}
+          <Link to={to} className="font-medium text-[#1E2D4A] hover:underline ml-1">{cta}</Link>
+        </p>
+        <p className={`text-xs text-gray-600 mt-0.5 ${done ? 'line-through text-[#10B981]' : ''}`}>{children}</p>
+      </div>
+    </li>
   );
 }

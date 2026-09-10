@@ -61,6 +61,7 @@ export const EVENT_TYPES = {
   EXPORT_HANDOFF_PACKAGE: 'export.handoff_package',
   RUN_FAILED: 'run.failed',
   RUN_SUBMITTED: 'run.submitted',
+  XERO_JOURNALS_PUSHED: 'xero.journals_pushed',
   AI_WORKFLOW_STARTED: 'ai.workflow.started',
   AI_WORKFLOW_COMPLETED: 'ai.workflow.completed',
   AI_ACTION_DENIED: 'ai.action.denied',

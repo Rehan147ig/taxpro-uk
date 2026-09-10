@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { workbench, handoff } from '../api/client';
 import { RunStatusBadge } from '../components/RunStatusBadge';
+import XeroPushPanel from '../components/XeroPushPanel';
 
 const SAMPLE_CSV = [
   '4000,Sales revenue,Income,Income,-4800000',
@@ -770,6 +771,10 @@ export default function WorkbenchPage() {
                         Append-only records — recorded by user {handoffView.run?.filedExternallyByUserId?.slice(0, 8) ?? '—'} at {handoffView.run?.filedExternallyAt ? new Date(handoffView.run.filedExternallyAt).toLocaleString() : '—'}. TaxPro did not submit this return.
                       </p>
                     </div>
+                  )}
+
+                  {handoffView.run?.status === 'locked' && handoffView.run?.id && (
+                    <XeroPushPanel runId={handoffView.run.id} locked />
                   )}
 
                   {handoffView.approvalEvents && handoffView.approvalEvents.length > 0 && (

@@ -211,6 +211,152 @@ export function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
+// ── ManualJournal push (TaxPro → Xero, locked runs only) ──
+// POST https://api.xero.com/api.xro/2.0/ManualJournals
+// Journals are created as DRAFT: the partner authorises inside Xero.
+// Nothing is ever auto-authorised from TaxPro.
+
+export interface XeroJournalPushLine {
+  accountCode: string;
+  description: string;
+  /** Exactly one of debit / credit must be positive. */
+  debit: number;
+  credit: number;
+  /** Xero tax type. 'NONE' keeps provision journals tax-neutral. */
+  taxType?: string;
+}
+
+export interface XeroJournalPushInput {
+  accessToken: string;
+  xeroTenantId: string;
+  narration: string;
+  /** YYYY-MM-DD — the provision period-end. */
+  date: string;
+  lines: XeroJournalPushLine[];
+}
+
+export interface XeroJournalPushResult {
+  manualJournalId: string;
+  status: string;
+}
+
+export class XeroApiError extends Error {
+  readonly status: number;
+  readonly body: string;
+  constructor(status: number, body: string, message?: string) {
+    super(message ?? `Xero API failed: ${status} ${body}`);
+    this.name = 'XeroApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
+export interface XeroManualJournalResponse {
+  ManualJournals?: Array<{ ManualJournalID?: string; Status?: string }>;
+}
+
+export async function pushManualJournal(input: XeroJournalPushInput): Promise<XeroJournalPushResult> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
+    throw new XeroApiError(400, 'date must be YYYY-MM-DD');
+  }
+  if (input.lines.length === 0) throw new XeroApiError(400, 'journal has no lines');
+  let totalDebit = 0;
+  let totalCredit = 0;
+  const journalLines = input.lines.map((l) => {
+    if (!l.accountCode) throw new XeroApiError(400, 'every journal line needs a Xero AccountCode');
+    const debit = round2(l.debit);
+    const credit = round2(l.credit);
+    if ((debit > 0 && credit > 0) || (debit === 0 && credit === 0)) {
+      throw new XeroApiError(400, `line "${l.description}" must have exactly one of debit/credit positive`);
+    }
+    totalDebit = round2(totalDebit + debit);
+    totalCredit = round2(totalCredit + credit);
+    // Xero LineAmount convention: positive = debit, negative = credit.
+    return {
+      AccountCode: l.accountCode,
+      Description: l.description,
+      LineAmount: debit > 0 ? debit : -credit,
+      TaxType: l.taxType ?? 'NONE',
+    };
+  });
+  if (totalDebit <= 0 || totalDebit !== totalCredit) {
+    throw new XeroApiError(400, `journal must balance: debit ${totalDebit} vs credit ${totalCredit}`);
+  }
+
+  const res = await fetch('https://api.xero.com/api.xro/2.0/ManualJournals', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`,
+      'xero-tenant-id': input.xeroTenantId,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      ManualJournals: [{
+        Narration: input.narration,
+        Date: input.date,
+        Status: 'DRAFT',
+        ShowOnCashBasisReports: false,
+        JournalLines: journalLines,
+      }],
+    }),
+  });
+  if (!res.ok) throw new XeroApiError(res.status, await res.text());
+  const json = (await res.json()) as XeroManualJournalResponse;
+  const journal = json.ManualJournals?.[0];
+  if (!journal?.ManualJournalID) throw new XeroApiError(res.status, 'Xero returned no ManualJournalID');
+  return { manualJournalId: journal.ManualJournalID, status: journal.Status ?? 'DRAFT' };
+}
+
+/**
+ * Map a TaxPro journal-export document to Xero push lines.
+ * Every internal account must map to an explicit Xero AccountCode supplied by
+ * the partner — codes are never guessed. Zero lines are skipped. Throws on
+ * unmapped accounts or an unbalanced result.
+ */
+export interface XeroAccountCodeMap {
+  currentTaxExpense: string;
+  corporationTaxPayable: string;
+  deferredTaxExpense: string;
+  deferredTaxProvision: string;
+  deferredTaxAsset: string;
+}
+
+const INTERNAL_TO_CODE_KEY: Record<string, keyof XeroAccountCodeMap> = {
+  'tax-expense-current': 'currentTaxExpense',
+  'tax-payable': 'corporationTaxPayable',
+  'tax-expense-deferred': 'deferredTaxExpense',
+  'deferred-tax-liability': 'deferredTaxProvision',
+  'deferred-tax-asset': 'deferredTaxAsset',
+};
+
+export function buildXeroPushLines(
+  doc: { entries: Array<{ type: string; memo: string; lines: Array<{ accountId: string; accountName: string; memo: string; debit: number; credit: number }> }> },
+  accountCodes: XeroAccountCodeMap,
+): XeroJournalPushLine[] {
+  for (const [key, code] of Object.entries(accountCodes)) {
+    if (!code || !code.trim()) throw new XeroApiError(400, `missing Xero AccountCode mapping for "${key}"`);
+  }
+  const lines: XeroJournalPushLine[] = [];
+  for (const entry of doc.entries) {
+    for (const line of entry.lines) {
+      if (line.debit === 0 && line.credit === 0) continue;
+      const key = INTERNAL_TO_CODE_KEY[line.accountId];
+      if (!key) {
+        throw new XeroApiError(400, `no Xero AccountCode mapping for TaxPro account "${line.accountId}" (${line.accountName}) — map it explicitly before pushing`);
+      }
+      lines.push({
+        accountCode: accountCodes[key].trim(),
+        description: `${line.accountName} — ${line.memo || entry.memo}`.slice(0, 4000),
+        debit: line.debit,
+        credit: line.credit,
+      });
+    }
+  }
+  if (lines.length === 0) throw new XeroApiError(400, 'journal has no non-zero lines to push');
+  return lines;
+}
+
 // ── Token field obfuscation (defense-in-depth for at-rest tokens) ──
 // AES-256-GCM with an env-derived key. For production, inject TOKEN_ENCRYPTION_KEY
 // and rotate it via KMS; the format prefix allows future migration.
