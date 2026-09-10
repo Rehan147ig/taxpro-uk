@@ -498,7 +498,9 @@ describe('Phase D — record external filing (bookkeeping, never a claim)', () =
 
     for (const path of [`/api/handoff/runs/${runId}`, `/api/handoff/runs/${runId}/package`, `/api/handoff/runs/${runId}/manifest`]) {
       const res = await app.request(path, { headers: { Authorization: `Bearer ${TOKEN_B}` } });
-      expect([400, 404]).toContain(res.status);
+      // Any denial counts: 404 (run hidden under RLS), 403 (app-level
+      // cross-tenant guard when the row is visible), or 400. Never 2xx.
+      expect([400, 403, 404]).toContain(res.status);
     }
 
     const filing = await app.request(`/api/handoff/runs/${runId}/record-filing`, {
