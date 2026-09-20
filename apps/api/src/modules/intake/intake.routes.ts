@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import crypto from 'crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, not, sql } from 'drizzle-orm';
 import { withTenantContext } from '../../config/db.js';
 import { entities } from '../../db/schema/entities.js';
 import { accountingPeriods } from '../../db/schema/accounting-periods.js';
@@ -21,7 +21,20 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '.
 import { parseCsv, rowToRecord } from './csv.js';
 import { validateRow, buildBatchSummary } from './validate.js';
 import type { NormalizedRow } from './validate.js';
-import { isIntakeXlsxEnabled, isIntakeSignConventionEnabled } from '../../config/features.js';
+import { isIntakeXlsxEnabled, isIntakeSignConventionEnabled, isIntakePriorBridgeEnabled } from '../../config/features.js';
+import {
+  diffPriorPeriod,
+  bridgeItemCount,
+  RENAME_SIMILARITY_THRESHOLD,
+  OPENING_BALANCE_TOLERANCE,
+  type PriorBridgeAccount,
+  type CurrentBridgeAccount,
+  type PriorPeriodBridgeResult,
+} from './prior-period-bridge.js';
+import { mappingProposals } from '../../db/schema/mapping-proposals.js';
+import { taxMappings } from '../../db/schema/tax-mappings.js';
+import { fallbackClassifyByName } from './memory.js';
+import { validateUkClassification } from '../mapping/uk-taxonomy.js';
 import {
   detectSignConvention,
   applySignInversion,
@@ -649,6 +662,54 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
       }
     }
 
+    // ── Prior-period bridge gate (Feature 3). New/missing/renamed accounts
+    // surface as proposals/warnings (never blocking); an unresolved
+    // OPENING_BALANCE_MISMATCH blocks commit — the deferred-tax rollforward
+    // must never silently disagree with the prior locked close.
+    let bridgeSummary: {
+      hasPriorRun: boolean; priorRunId: string | null;
+      newAccounts: number; missingAccounts: number; renames: number; mismatches: number;
+    } | null = null;
+    if (isIntakePriorBridgeEnabled()) {
+      const [bridgePeriod] = await tx.select().from(accountingPeriods)
+        .where(and(eq(accountingPeriods.tenantId, user.tenantId), eq(accountingPeriods.id, batch.accountingPeriodId)))
+        .limit(1);
+      if (bridgePeriod) {
+        const priorRun = await findPriorLockedRun(tx, user.tenantId, batch.entityId, bridgePeriod.startDate);
+        if (priorRun) {
+          const effectiveNormals = committableRows
+            .map((r) => signTransformByRowId?.get((r as { id: string }).id) ?? ((r as { normalized: unknown }).normalized as NormalizedRow | null))
+            .filter((n): n is NormalizedRow => !!n);
+          const bridgeResult = diffPriorPeriod(
+            await loadPriorBridgeAccounts(tx, user.tenantId, priorRun),
+            bridgeCurrentAccounts(effectiveNormals),
+          );
+          await persistBridgeResult(tx, user.tenantId, batch, bridgeResult, priorRun.id);
+          bridgeSummary = {
+            hasPriorRun: true,
+            priorRunId: priorRun.id,
+            newAccounts: bridgeResult.newAccounts.length,
+            missingAccounts: bridgeResult.missingAccounts.length,
+            renames: bridgeResult.renames.length,
+            mismatches: bridgeResult.mismatches.length,
+          };
+          const blocking = await tx.select({ id: reviewItems.id }).from(reviewItems).where(and(
+            eq(reviewItems.tenantId, user.tenantId),
+            eq(reviewItems.sourceRef, bridgeSourceRef(batchId)),
+            eq(reviewItems.itemType, 'OPENING_BALANCE_MISMATCH'),
+            not(inArray(reviewItems.status, [...BRIDGE_FINAL_STATUSES])),
+          ));
+          if (blocking.length > 0) {
+            throw new ConflictError(
+              `OPENING_BALANCE_MISMATCH: ${blocking.length} balance-sheet opening(s) disagree with the prior locked close (review item(s) ${blocking.map((b) => b.id).join(', ')}). A reviewer must resolve each with a reason before commit.`,
+            );
+          }
+        } else {
+          bridgeSummary = { hasPriorRun: false, priorRunId: null, newAccounts: 0, missingAccounts: 0, renames: 0, mismatches: 0 };
+        }
+      }
+    }
+
     let committedRows = 0;
     const importedAccountIds = new Set<string>();
 
@@ -827,6 +888,7 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
           applied: signTransformByRowId !== null,
         },
       } : {}),
+      ...(bridgeSummary ? { priorBridge: bridgeSummary } : {}),
     });
   });
 });
@@ -1442,6 +1504,396 @@ intakeRoutes.post('/batches/:id/sign-convention/reject', requireMinimumRole('rev
       afterState: { decision: 'rejected', totals: signTotalsByType(normals.map((r) => r.normalized)) },
     });
     return c.json({ item: updated, report });
+  });
+});
+
+// ── Prior-period bridge (Feature 3, behind INTAKE_PRIOR_BRIDGE) ──
+//
+// Deferred-tax rollforward assumes this period's openings match last
+// period's closings. On commit, when a prior locked run exists for the same
+// entity, the import is diffed against that run's approved mapped accounts:
+// new accounts become mapping proposals (never review items); missing and
+// renamed accounts become warning review items (renames also get a
+// carry-forward proposal a human must accept — never silent); balance-sheet
+// continuity breaks over OPENING_BALANCE_TOLERANCE become error review items
+// that block commit until a human resolves them via the narrow endpoint
+// below (same review_items table + review_item_events ledger as every other
+// flow — no parallel resolution machinery).
+
+const BRIDGE_ITEM_TYPES = ['NEW_ACCOUNT', 'MISSING_PRIOR_ACCOUNT', 'POSSIBLE_RENAME', 'OPENING_BALANCE_MISMATCH'] as const;
+const BRIDGE_FINAL_STATUSES = ['resolved', 'rejected', 'waived'];
+
+function requirePriorBridgeEnabled(): void {
+  if (!isIntakePriorBridgeEnabled()) {
+    throw new ForbiddenError('Prior-period bridge is disabled (INTAKE_PRIOR_BRIDGE off)');
+  }
+}
+
+function bridgeSourceRef(batchId: string): string {
+  return `import_batch:${batchId}`;
+}
+
+/** Latest locked run for the entity strictly before the batch's period. */
+async function findPriorLockedRun(tx: any, tenantId: string, entityId: string, periodStart: string) {
+  const [run] = await tx.select().from(provisionRuns)
+    .where(and(
+      eq(provisionRuns.tenantId, tenantId),
+      eq(provisionRuns.entityId, entityId),
+      eq(provisionRuns.status, 'locked'),
+      lt(provisionRuns.period, periodStart),
+    ))
+    .orderBy(desc(provisionRuns.period))
+    .limit(1);
+  return run ?? null;
+}
+
+async function activeMappingForAccount(tx: any, tenantId: string, accountId: string) {
+  const [mapping] = await tx.select().from(taxMappings)
+    .where(and(
+      eq(taxMappings.tenantId, tenantId),
+      eq(taxMappings.accountId, accountId),
+      eq(taxMappings.isActive, true),
+    ))
+    .orderBy(desc(taxMappings.version))
+    .limit(1);
+  return mapping ?? null;
+}
+
+/**
+ * Prior locked run's approved mapped accounts: the committed rows of the
+ * currently-active batch for the run's accounting period (same "active
+ * batch" definition as lib/import-batch-link.ts — committed, non-superseded,
+ * latest — i.e. the live prior close the rollforward consumes), falling back
+ * to the trial-balance snapshot at the run's period for runs that predate
+ * batch linkage. Each carries its active tax mapping (if any) so renames can
+ * suggest it as carry-forward.
+ */
+async function loadPriorBridgeAccounts(tx: any, tenantId: string, run: { accountingPeriodId: string | null; period: string; entityId: string }): Promise<PriorBridgeAccount[]> {
+  let batchId: string | null = null;
+  if (run.accountingPeriodId && run.entityId) {
+    const [active] = await tx.select({ id: importBatches.id }).from(importBatches)
+      .where(and(
+        eq(importBatches.tenantId, tenantId),
+        eq(importBatches.entityId, run.entityId),
+        eq(importBatches.accountingPeriodId, run.accountingPeriodId),
+        eq(importBatches.status, 'committed'),
+        isNull(importBatches.supersededByBatchId),
+      ))
+      .orderBy(desc(importBatches.createdAt))
+      .limit(1);
+    batchId = active?.id ?? null;
+  }
+
+  if (batchId) {
+    const rows = await tx.select().from(importBatchRows)
+      .where(and(eq(importBatchRows.batchId, batchId), eq(importBatchRows.status, 'committed')));
+    const out: PriorBridgeAccount[] = [];
+    for (const row of rows) {
+      const normalized = row.normalized as {
+        accountExternalId?: string; accountName?: string; accountType?: string; balance?: number;
+      } | null;
+      if (!normalized) continue;
+      const mapping = row.accountId ? await activeMappingForAccount(tx, tenantId, row.accountId) : null;
+      out.push({
+        externalId: normalized.accountExternalId ?? '',
+        name: normalized.accountName ?? '',
+        accountType: normalized.accountType ?? '',
+        closingBalance: normalized.balance ?? 0,
+        mapping: mapping ? {
+          id: mapping.id,
+          taxAccountType: mapping.taxAccountType,
+          bookTreatment: mapping.bookTreatment,
+          timingCategory: mapping.timingCategory ?? null,
+        } : null,
+      });
+    }
+    return out;
+  }
+
+  const tbRows = await tx.select({
+    balance: trialBalance.balance,
+    period: trialBalance.period,
+    accountId: accounts.id,
+    externalId: accounts.externalId,
+    name: accounts.name,
+    type: accounts.type,
+  }).from(trialBalance)
+    .innerJoin(accounts, eq(accounts.id, trialBalance.accountId))
+    .where(and(
+      eq(trialBalance.tenantId, tenantId),
+      eq(trialBalance.entityId, run.entityId),
+      eq(trialBalance.period, run.period),
+    ));
+  const out: PriorBridgeAccount[] = [];
+  for (const row of tbRows) {
+    const mapping = await activeMappingForAccount(tx, tenantId, row.accountId);
+    out.push({
+      externalId: row.externalId ?? '',
+      name: row.name,
+      accountType: row.type,
+      closingBalance: row.balance,
+      mapping: mapping ? {
+        id: mapping.id,
+        taxAccountType: mapping.taxAccountType,
+        bookTreatment: mapping.bookTreatment,
+        timingCategory: mapping.timingCategory ?? null,
+      } : null,
+    });
+  }
+  return out;
+}
+
+function bridgeCurrentAccounts(normals: NormalizedRow[]): CurrentBridgeAccount[] {
+  return normals.map((n) => ({
+    externalId: n.accountExternalId ?? '',
+    name: n.accountName ?? '',
+    accountType: n.accountType ?? '',
+    balance: n.balance ?? 0,
+  }));
+}
+
+async function openBridgeItemsForBatch(tx: any, tenantId: string, batchId: string) {
+  return tx.select().from(reviewItems)
+    .where(and(
+      eq(reviewItems.tenantId, tenantId),
+      eq(reviewItems.sourceRef, bridgeSourceRef(batchId)),
+      inArray(reviewItems.itemType, [...BRIDGE_ITEM_TYPES]),
+      not(inArray(reviewItems.status, [...BRIDGE_FINAL_STATUSES])),
+    ));
+}
+
+async function pendingProposalExists(tx: any, tenantId: string, entityId: string, source: string, externalId: string): Promise<boolean> {
+  const [existing] = await tx.select({ id: mappingProposals.id }).from(mappingProposals)
+    .where(and(
+      eq(mappingProposals.tenantId, tenantId),
+      eq(mappingProposals.entityId, entityId),
+      eq(mappingProposals.proposalSource, source),
+      eq(mappingProposals.sourceAccountExternalId, externalId),
+      eq(mappingProposals.status, 'pending'),
+    ))
+    .limit(1);
+  return !!existing;
+}
+
+/**
+ * Persist the pure diff through existing machinery (idempotent: open items
+ * and pending proposals are reused, never duplicated). Returns the created /
+ * reused review items and proposals.
+ */
+async function persistBridgeResult(
+  tx: any,
+  tenantId: string,
+  batch: { id: string; entityId: string },
+  result: PriorPeriodBridgeResult,
+  priorRunId: string,
+) {
+  const items: Array<{ id: string; itemType: string; status: string }> = [];
+  const proposals: Array<{ id: string; proposalSource: string }> = [];
+  const openItems = await openBridgeItemsForBatch(tx, tenantId, batch.id);
+  const openKey = new Set(openItems.map((i: { itemType: string; metadata: unknown }) =>
+    `${i.itemType}:${((i.metadata as { externalId?: string } | null)?.externalId ?? '').toLowerCase()}`));
+
+  async function ensureItem(itemType: string, severity: string, title: string, description: string, externalId: string, metadata: Record<string, unknown>) {
+    const key = `${itemType}:${externalId.toLowerCase()}`;
+    const reused = openItems.find((i: { itemType: string; metadata: unknown }) =>
+      `${i.itemType}:${(((i.metadata as { externalId?: string } | null)?.externalId ?? '').toLowerCase())}` === key);
+    if (reused) {
+      items.push({ id: reused.id, itemType, status: reused.status });
+      return reused;
+    }
+    const [item] = await tx.insert(reviewItems).values({
+      tenantId,
+      provisionRunId: null,
+      itemType,
+      severity,
+      status: 'open',
+      title,
+      description,
+      entityId: batch.entityId,
+      sourceRef: bridgeSourceRef(batch.id),
+      metadata: { batchId: batch.id, priorRunId, externalId, ...metadata },
+    }).returning();
+    items.push({ id: item.id, itemType, status: item.status });
+    void openKey.add(key);
+    return item;
+  }
+
+  for (const m of result.missingAccounts) {
+    await ensureItem(
+      'MISSING_PRIOR_ACCOUNT', 'warning',
+      `Account "${m.prior.name}" from the prior locked period is missing`,
+      `Account "${m.prior.name}" (${m.prior.externalId || 'no external id'}, ${m.prior.accountType}) was in the prior locked run but has no row in this import. Confirm it was closed/merged, or fix the export.`,
+      m.prior.externalId || m.prior.name,
+      { code: 'MISSING_PRIOR_ACCOUNT', priorName: m.prior.name, priorType: m.prior.accountType, priorClosing: String(m.prior.closingBalance) },
+    );
+  }
+
+  for (const r of result.renames) {
+    const priorMapping = r.prior.mapping;
+    const fallback = fallbackClassifyByName(r.current.name, r.current.accountType);
+    const target = validateUkClassification(priorMapping?.taxAccountType ?? fallback.taxAccountType);
+    let proposalId: string | null = null;
+    if (!await pendingProposalExists(tx, tenantId, batch.entityId, 'carry_forward', r.current.externalId || r.current.name)) {
+      const [proposal] = await tx.insert(mappingProposals).values({
+        tenantId,
+        entityId: batch.entityId,
+        accountId: null,
+        sourceAccountExternalId: (r.current.externalId || r.current.name).slice(0, 100),
+        sourceAccountName: r.current.name.slice(0, 255),
+        targetTaxClassification: target,
+        bookTreatment: (priorMapping?.bookTreatment ?? fallback.bookTreatment) as 'permanent' | 'temporary' | 'no_diff' | 'manual_review',
+        timingCategory: priorMapping?.timingCategory ?? fallback.timingCategory ?? null,
+        confidenceScore: String(Math.min(0.95, 0.5 + r.similarity * 0.4)),
+        proposalSource: 'carry_forward',
+        status: 'pending',
+        version: 1,
+        carriesForward: true,
+        priorMappingId: priorMapping?.id ?? null,
+        decisionReason: priorMapping
+          ? `Possible rename of "${r.prior.name}" (similarity ${Math.round(r.similarity * 100)}%); carries forward mapping ${priorMapping.taxAccountType}. A human must accept before it applies.`
+          : `Possible rename of "${r.prior.name}" (similarity ${Math.round(r.similarity * 100)}%); no prior mapping found, rule-based suggestion. A human must accept before it applies.`,
+      }).returning();
+      proposalId = proposal.id;
+      proposals.push({ id: proposal.id, proposalSource: 'carry_forward' });
+    }
+    await ensureItem(
+      'POSSIBLE_RENAME', 'warning',
+      `Possible rename: "${r.prior.name}" → "${r.current.name}"`,
+      `"${r.current.name}" looks like a rename of prior-period "${r.prior.name}" (token similarity ${Math.round(r.similarity * 100)}%, threshold ${Math.round(RENAME_SIMILARITY_THRESHOLD * 100)}%). A carry-forward mapping proposal was raised — accept it to apply, or fix the export.`,
+      r.current.externalId || r.current.name,
+      {
+        code: 'POSSIBLE_RENAME', similarity: r.similarity,
+        priorName: r.prior.name, priorExternalId: r.prior.externalId,
+        priorMapping: priorMapping ? { id: priorMapping.id, taxAccountType: priorMapping.taxAccountType } : null,
+        proposalId,
+      },
+    );
+  }
+
+  for (const n of result.newAccounts) {
+    const fallback = fallbackClassifyByName(n.current.name, n.current.accountType);
+    if (!await pendingProposalExists(tx, tenantId, batch.entityId, 'import', n.current.externalId || n.current.name)) {
+      const [proposal] = await tx.insert(mappingProposals).values({
+        tenantId,
+        entityId: batch.entityId,
+        accountId: null,
+        sourceAccountExternalId: (n.current.externalId || n.current.name).slice(0, 100),
+        sourceAccountName: n.current.name.slice(0, 255),
+        targetTaxClassification: validateUkClassification(fallback.taxAccountType),
+        bookTreatment: fallback.bookTreatment,
+        timingCategory: fallback.timingCategory ?? null,
+        confidenceScore: String(fallback.confidence),
+        proposalSource: 'import',
+        status: 'pending',
+        version: 1,
+        carriesForward: false,
+        priorMappingId: null,
+        decisionReason: `First seen in this period's import — no prior-period account to inherit from. Rule-based suggestion; a human must decide.`,
+      }).returning();
+      proposals.push({ id: proposal.id, proposalSource: 'import' });
+    }
+  }
+
+  for (const m of result.mismatches) {
+    await ensureItem(
+      'OPENING_BALANCE_MISMATCH', 'error',
+      `Opening balance mismatch on "${m.current.name}" (£${m.delta})`,
+      `Balance-sheet account "${m.current.name}": prior locked closing ${m.priorClosing} vs this import ${m.currentOpening} (delta £${m.delta}, tolerance £${OPENING_BALANCE_TOLERANCE}). Commit is blocked until a reviewer resolves this item with a reason.`,
+      m.current.externalId || m.current.name,
+      {
+        code: 'OPENING_BALANCE_MISMATCH',
+        priorClosing: m.priorClosing, currentOpening: m.currentOpening, delta: m.delta,
+        priorName: m.prior.name,
+      },
+    );
+  }
+
+  return { items, proposals };
+}
+
+const bridgeResolveSchema = z.object({
+  reason: z.string().min(1, 'A resolution reason is required for the audit trail').max(2000),
+});
+
+const ROLE_ORDER: Record<string, number> = {
+  client_readonly: 0, auditor: 1, preparer: 2, reviewer: 3, partner: 4, admin: 5,
+};
+
+intakeRoutes.get('/batches/:id/prior-bridge', async (c) => {
+  requirePriorBridgeEnabled();
+  const user = c.get('user');
+  const { id: batchId } = c.req.param();
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    const batch = await requireBatch(tx, user.tenantId, batchId);
+    const [period] = await tx.select().from(accountingPeriods)
+      .where(and(eq(accountingPeriods.tenantId, user.tenantId), eq(accountingPeriods.id, batch.accountingPeriodId)))
+      .limit(1);
+    if (!period) throw new NotFoundError('Accounting period', batch.accountingPeriodId);
+    const priorRun = await findPriorLockedRun(tx, user.tenantId, batch.entityId, period.startDate);
+    if (!priorRun) {
+      return c.json({ batchId, priorRunId: null, result: { newAccounts: [], missingAccounts: [], renames: [], mismatches: [] } });
+    }
+    const normals = await loadCommittableNormals(tx, batchId);
+    const result = diffPriorPeriod(
+      await loadPriorBridgeAccounts(tx, user.tenantId, priorRun),
+      bridgeCurrentAccounts(normals.map((r) => r.normalized)),
+    );
+    return c.json({ batchId, priorRunId: priorRun.id, result });
+  });
+});
+
+// Narrow resolve action for bridge items (the provision run-scoped resolve
+// endpoint cannot touch run-less intake items). Mandatory reason, append-only
+// history, batch-ledger note — the same lifecycle, not a parallel flow.
+intakeRoutes.post('/batches/:id/bridge/items/:itemId/resolve', requireMinimumRole('preparer'), zValidator('json', bridgeResolveSchema), async (c) => {
+  requirePriorBridgeEnabled();
+  const user = c.get('user');
+  const { id: batchId, itemId } = c.req.param();
+  const { reason } = c.req.valid('json');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    await requireBatch(tx, user.tenantId, batchId);
+    const [item] = await tx.select().from(reviewItems)
+      .where(and(
+        eq(reviewItems.tenantId, user.tenantId),
+        eq(reviewItems.id, itemId),
+        eq(reviewItems.sourceRef, bridgeSourceRef(batchId)),
+      ))
+      .limit(1);
+    if (!item) throw new NotFoundError('Bridge review item', itemId);
+    if (!(BRIDGE_ITEM_TYPES as readonly string[]).includes(item.itemType)) {
+      throw new BadRequestError(`Item ${itemId} is not a prior-period bridge item (type: ${item.itemType})`);
+    }
+    if (BRIDGE_FINAL_STATUSES.includes(item.status)) {
+      throw new ConflictError(`Bridge item is already ${item.status}`);
+    }
+    if (item.itemType === 'OPENING_BALANCE_MISMATCH' && (ROLE_ORDER[user.role as string] ?? -1) < ROLE_ORDER.reviewer) {
+      throw new ForbiddenError('Resolving an opening-balance mismatch requires at least the reviewer role');
+    }
+
+    const before = { status: item.status };
+    const [updated] = await tx.update(reviewItems).set({
+      status: 'resolved',
+      resolvedByUserId: user.userId,
+      resolutionNote: reason,
+      resolvedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(eq(reviewItems.id, item.id)).returning();
+    await tx.insert(reviewItemEvents).values({
+      tenantId: user.tenantId,
+      reviewItemId: item.id,
+      eventType: 'status_changed',
+      actorUserId: user.userId,
+      reason,
+      beforeState: before,
+      afterState: { status: 'resolved' },
+    });
+    await recordBatchEvent(tx, {
+      tenantId: user.tenantId, batchId, eventType: 'batch.bridge_item_resolved',
+      actorUserId: user.userId, reason, afterState: { itemId: item.id, itemType: item.itemType },
+    });
+    return c.json({ item: updated });
   });
 });
 

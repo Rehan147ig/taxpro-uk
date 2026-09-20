@@ -289,6 +289,56 @@ append-only `import_batch_events` ledger. Note: the brief asked for
 and no run exists at intake-commit time — the batch ledger plus the
 resolved review item is the correct audit home (called out, not silent).
 
+### 4.10 Messy-data ingest hardening — Feature 3: Prior-period bridge
+
+Status: ✅ shipped behind `INTAKE_PRIOR_BRIDGE` (default off, per-tenant via env).
+
+Problem: deferred-tax rollforward assumes this period's openings match last
+period's closings, but clients rename/split/merge accounts between years —
+silent misalignment corrupts the rollforward.
+
+Flow: on commit (after the validation + sign gates), when a prior locked
+run exists for the same entity (`provision_runs`, `status = 'locked'`,
+latest `period` before the batch's accounting period), the import is diffed
+(`modules/intake/prior-period-bridge.ts`, pure + deterministic, Decimal.js,
+existing `nameSimilarity` reused — never reimplemented) against that run's
+approved mapped accounts (committed rows of the run's active batch — same
+committed/non-superseded/latest definition as `lib/import-batch-link.ts` —
+with active `tax_mappings` attached; trial-balance snapshot at the run's
+period for pre-linkage runs). First period (no locked run) yields zero
+items. Matching is exact-first (externalId, else normalized name), then
+fuzzy renames on leftovers (same accountType,
+`RENAME_SIMILARITY_THRESHOLD = 0.75` — stricter than
+`NAME_SIMILARITY_THRESHOLD` (0.5) since renames suggest mappings), so a
+rename never double-emits as missing+new. Continuity is checked on matched
+balance-sheet pairs only (P&L legitimately moves every period):
+`|current − prior| > OPENING_BALANCE_TOLERANCE (£1, mirroring
+`CONTROL_TOLERANCE`) emits the blocker. The imported TB balance is treated
+as the period-opening position (the only opening figure the data model
+carries — stated, not hidden).
+
+Surfacing (all existing machinery, idempotent — open items and pending
+proposals are reused, never duplicated): `NEW_ACCOUNT` → mapping proposal
+(`proposalSource: 'import'`, rule-based `fallbackClassifyByName`
+suggestion, human decides), never a review item; `MISSING_PRIOR_ACCOUNT` →
+warning review item; `POSSIBLE_RENAME` → warning review item plus a
+`carry_forward` proposal (`carriesForward: true`, `priorMappingId` set, a
+human accepts before anything applies); `OPENING_BALANCE_MISMATCH` → error
+review item (`review_items`, `provisionRunId: null`,
+`sourceRef: import_batch:<id>`, delta in `metadata`) that blocks commit
+with `409` while non-final. Mismatches resolve via the narrow
+`POST /batches/:id/bridge/items/:itemId/resolve` (mandatory reason,
+reviewer+ for the error, append-only `review_item_events` + batch-ledger
+note — the run-scoped provision resolve endpoint cannot touch run-less
+intake items, so this is the same lifecycle, not a parallel flow).
+`GET /batches/:id/prior-bridge` returns the live diff with no side effects.
+Workbench runs only ever see committed, bridge-checked trial balances, so a
+silently-disagreeing opening can never reach a rollforward.
+
+Error codes (stable): `NEW_ACCOUNT` (proposal), `MISSING_PRIOR_ACCOUNT`
+(warning), `POSSIBLE_RENAME` (warning + proposal), `OPENING_BALANCE_MISMATCH`
+(error, blocking).
+
 ---
 
 ## 5. Feature Flags: US Dormancy + Intake Hardening
