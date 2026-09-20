@@ -249,6 +249,46 @@ gates (Features 2–4) apply unchanged. `client_fingerprint = sha256(JSON
 every query via `withTenantContext`; raw workbook bytes stay in the
 immutable upload artifact.
 
+### 4.9 Messy-data ingest hardening — Feature 2: Sign-convention detection
+
+Status: ✅ shipped behind `INTAKE_SIGN_CONVENTION` (default off, per-tenant via env).
+
+Problem: control totals still balance when a source system flips every sign
+(revenue negative / expenses positive or vice versa), so `validate.ts`
+cannot catch it — yet the engine would silently compute the wrong tax.
+
+Flow: `detectSignConvention(rows)` (`modules/intake/sign-convention.ts`,
+pure + deterministic, Decimal.js aggregation, no AI) sums signed balances
+(`balance = debit − credit`) by accountType. Standard UK convention:
+Income/Equity/Liability credit-natured (negative), Expense/Asset
+debit-natured (positive); per-type totals within `SIGN_TOLERANCE = £1`
+(mirroring `CONTROL_TOLERANCE`) carry no signal. Fewer than two signalling
+types (empty TB, single-type TB) → `standard` — never a false positive.
+All signalling types flipped → `inverted`; some flipped → `mixed`.
+
+`POST /api/intake/batches/:id/commit` runs the gate (after the existing
+validation check): `standard` commits untouched; `mixed` raises a
+`SIGN_CONVENTION_MIXED` warning review item and commits as-is; `inverted`
+raises a `SIGN_CONVENTION_INVERTED` error review item (`review_items`,
+`provisionRunId: null`, `sourceRef: import_batch:<id>`, per-type breakdown
+in `metadata`) and blocks with `409` until a reviewer (`reviewer`+ role)
+confirms (`POST …/sign-convention/confirm` → item `resolved`, correction
+applied once at commit: every amount × −1, Decimal-exact) or rejects
+(`POST …/sign-convention/reject` → item `rejected`, batch stays blocked
+until the source file is fixed). `GET …/sign-convention` returns the live
+report. Raw `import_batch_rows.raw` and the SHA-256 upload artifact are
+never mutated — only `normalized` on committed rows reflects the
+correction, so the engine computes exactly the standard-convention numbers.
+
+Error codes (stable): `SIGN_CONVENTION_INVERTED` (error, blocking),
+`SIGN_CONVENTION_MIXED` (warning, non-blocking), plus the reused validator
+codes. Audit: `batch.sign_convention_confirmed` / `rejected` /
+`batch.sign_convention_applied` (before/after per-type totals) on the
+append-only `import_batch_events` ledger. Note: the brief asked for
+`provision_events`, but that table requires a NOT NULL `provision_run_id`
+and no run exists at intake-commit time — the batch ledger plus the
+resolved review item is the correct audit home (called out, not silent).
+
 ---
 
 ## 5. Feature Flags: US Dormancy + Intake Hardening

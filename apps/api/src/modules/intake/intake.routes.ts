@@ -20,7 +20,16 @@ import { requireMinimumRole } from '../../lib/middleware/rbac.js';
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { parseCsv, rowToRecord } from './csv.js';
 import { validateRow, buildBatchSummary } from './validate.js';
-import { isIntakeXlsxEnabled } from '../../config/features.js';
+import type { NormalizedRow } from './validate.js';
+import { isIntakeXlsxEnabled, isIntakeSignConventionEnabled } from '../../config/features.js';
+import {
+  detectSignConvention,
+  applySignInversion,
+  signTotalsByType,
+  type SignConventionReport,
+} from './sign-convention.js';
+import { reviewItems } from '../../db/schema/review-items.js';
+import { reviewItemEvents } from '../../db/schema/review-item-events.js';
 import {
   parseXlsxBuffer,
   buildSheetPreviews,
@@ -608,11 +617,43 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
     const committableRows = await tx.select().from(importBatchRows)
       .where(and(eq(importBatchRows.batchId, batchId), eq(importBatchRows.status, 'ok')));
 
+    // ── Sign-convention gate (Feature 2). Deterministic, human-decided, never
+    // silent: INVERTED blocks commit until a reviewer confirms (the transform
+    // below then applies once); MIXED raises a warning item and commits as-is.
+    let signReport: SignConventionReport | null = null;
+    let signTransformByRowId: Map<string, NormalizedRow> | null = null;
+    let signBeforeTotals: Record<string, string> | null = null;
+    if (isIntakeSignConventionEnabled()) {
+      const normals = committableRows
+        .filter((r) => (r as { normalized: unknown }).normalized)
+        .map((r) => (r as { normalized: unknown }).normalized as NormalizedRow);
+      signReport = detectSignConvention(normals);
+      if (signReport.classification === 'mixed') {
+        await ensureSignReviewItem(tx, user.tenantId, batch, signReport);
+        await recordBatchEvent(tx, {
+          tenantId: user.tenantId, batchId, eventType: 'batch.sign_convention_mixed',
+          actorType: 'system', afterState: { code: signReport.code, totals: signTotalsByType(normals) },
+        });
+      } else if (signReport.classification === 'inverted') {
+        const item = await findLatestSignItem(tx, user.tenantId, batchId, 'SIGN_CONVENTION_INVERTED');
+        const confirmed = item?.status === 'resolved' && (item.metadata as { decision?: string } | null)?.decision === 'confirmed';
+        if (!confirmed) {
+          const openItem = await ensureSignReviewItem(tx, user.tenantId, batch, signReport);
+          throw new ConflictError(
+            `SIGN_CONVENTION_INVERTED: batch signs are fully inverted (review item ${openItem.id}). A reviewer must confirm (applies a × −1 correction) or reject (fix the source file) before commit.`,
+          );
+        }
+        signBeforeTotals = signTotalsByType(normals);
+        const transformed = applySignInversion(normals);
+        signTransformByRowId = new Map(committableRows.map((r, i) => [(r as { id: string }).id, transformed[i]]));
+      }
+    }
+
     let committedRows = 0;
     const importedAccountIds = new Set<string>();
 
     for (const row of committableRows) {
-      const normalized = row.normalized as any;
+      const normalized = (signTransformByRowId?.get((row as { id: string }).id) ?? (row as { normalized: unknown }).normalized) as any;
       if (!normalized) continue;
 
       const [entity] = await tx.insert(entities).values({
@@ -675,6 +716,9 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
         status: 'committed',
         accountId: account.id,
         committedTrialBalanceId: tb.id,
+        // Sign-corrected normalized values are what the engine consumed; the
+        // immutable raw upload (row.raw + source document bytes) is untouched.
+        ...(signTransformByRowId ? { normalized } : {}),
       }).where(eq(importBatchRows.id, row.id));
 
       importedAccountIds.add(account.id);
@@ -734,6 +778,23 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
       });
     }
 
+    // The reviewer-confirmed × −1 correction is fully auditable: before/after
+    // per-type totals land in the batch's append-only event ledger. (Note:
+    // provision_events cannot host this — its provision_run_id is NOT NULL
+    // and no run exists at intake-commit time. The batch ledger plus the
+    // resolved SIGN_CONVENTION_INVERTED review item is the audit trail.)
+    if (signTransformByRowId && signBeforeTotals) {
+      const afterRows = await tx.select({ normalized: importBatchRows.normalized }).from(importBatchRows)
+        .where(and(eq(importBatchRows.batchId, batchId), eq(importBatchRows.status, 'committed')));
+      await recordBatchEvent(tx, {
+        tenantId: user.tenantId, batchId, eventType: 'batch.sign_convention_applied',
+        actorUserId: user.userId,
+        beforeState: { totals: signBeforeTotals },
+        afterState: { totals: signTotalsByType(afterRows.map((r) => r.normalized as NormalizedRow)) },
+        reason: 'Reviewer-confirmed sign inversion applied once at commit time.',
+      });
+    }
+
     await recordBatchEvent(tx, {
       tenantId: user.tenantId, batchId, eventType: 'batch.committed',
       actorUserId: user.userId,
@@ -759,6 +820,13 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
       committedRows,
       accounts: importedAccountIds.size,
       supersededBatches: superseded.map((s) => s.id),
+      ...(signReport ? {
+        signConvention: {
+          classification: signReport.classification,
+          code: signReport.code,
+          applied: signTransformByRowId !== null,
+        },
+      } : {}),
     });
   });
 });
@@ -1188,6 +1256,192 @@ intakeRoutes.get('/column-maps', async (c) => {
       .limit(1);
     if (!saved) throw new NotFoundError('Column map', fp);
     return c.json({ map: saved });
+  });
+});
+
+// ── Sign-convention detection (Feature 2, behind INTAKE_SIGN_CONVENTION) ──
+//
+// Debit/credit control totals still balance when a source system flips every
+// sign, so validate.ts cannot catch it. Detection is purely deterministic
+// (see ./sign-convention.ts — no AI) and never auto-applies: an INVERTED
+// batch blocks commit with a 409 until a reviewer confirms (commit then
+// multiplies every amount by −1, audited) or rejects (fix the source file).
+// A MIXED batch raises a warning review item and commits untransformed.
+
+function requireSignConventionEnabled(): void {
+  if (!isIntakeSignConventionEnabled()) {
+    throw new ForbiddenError('Sign-convention detection is disabled (INTAKE_SIGN_CONVENTION off)');
+  }
+}
+
+function signSourceRef(batchId: string): string {
+  return `import_batch:${batchId}`;
+}
+
+async function findLatestSignItem(tx: any, tenantId: string, batchId: string, code: string) {
+  const [item] = await tx.select().from(reviewItems)
+    .where(and(
+      eq(reviewItems.tenantId, tenantId),
+      eq(reviewItems.itemType, code),
+      eq(reviewItems.sourceRef, signSourceRef(batchId)),
+    ))
+    .orderBy(desc(reviewItems.createdAt))
+    .limit(1);
+  return item ?? null;
+}
+
+async function findOpenSignItem(tx: any, tenantId: string, batchId: string, code: string) {
+  const [item] = await tx.select().from(reviewItems)
+    .where(and(
+      eq(reviewItems.tenantId, tenantId),
+      eq(reviewItems.itemType, code),
+      eq(reviewItems.sourceRef, signSourceRef(batchId)),
+      eq(reviewItems.status, 'open'),
+    ))
+    .orderBy(desc(reviewItems.createdAt))
+    .limit(1);
+  return item ?? null;
+}
+
+function signItemTitle(report: SignConventionReport, batchId: string): string {
+  return report.classification === 'inverted'
+    ? `Sign convention inverted on import batch ${batchId.slice(0, 8)}`
+    : `Sign convention mixed on import batch ${batchId.slice(0, 8)}`;
+}
+
+async function ensureSignReviewItem(
+  tx: any,
+  tenantId: string,
+  batch: { id: string; entityId: string },
+  report: SignConventionReport,
+) {
+  const existing = report.classification === 'inverted'
+    ? await findOpenSignItem(tx, tenantId, batch.id, 'SIGN_CONVENTION_INVERTED')
+    : await findOpenSignItem(tx, tenantId, batch.id, 'SIGN_CONVENTION_MIXED');
+  if (existing) return existing;
+  const code = report.classification === 'inverted' ? 'SIGN_CONVENTION_INVERTED' : 'SIGN_CONVENTION_MIXED';
+  const [item] = await tx.insert(reviewItems).values({
+    tenantId,
+    provisionRunId: null,
+    itemType: code,
+    severity: report.severity,
+    status: 'open',
+    title: signItemTitle(report, batch.id),
+    description: report.message,
+    entityId: batch.entityId,
+    sourceRef: signSourceRef(batch.id),
+    metadata: { batchId: batch.id, code, totals: report.totals, signalTypes: report.signalTypes },
+  }).returning();
+  return item;
+}
+
+async function resolveSignReviewItem(
+  tx: any,
+  tenantId: string,
+  userId: string,
+  item: { id: string; status: string },
+  decision: 'confirmed' | 'rejected',
+  reason: string,
+  report: SignConventionReport,
+  batchId: string,
+) {
+  const before = { status: item.status };
+  const [updated] = await tx.update(reviewItems).set({
+    status: decision === 'confirmed' ? 'resolved' : 'rejected',
+    resolvedByUserId: userId,
+    resolutionNote: reason,
+    metadata: { batchId, code: report.code, decision, totals: report.totals, signalTypes: report.signalTypes },
+    resolvedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(reviewItems.id, item.id)).returning();
+  await tx.insert(reviewItemEvents).values({
+    tenantId,
+    reviewItemId: item.id,
+    eventType: 'status_changed',
+    actorUserId: userId,
+    reason,
+    beforeState: before,
+    afterState: { status: updated.status, decision },
+  });
+  return updated;
+}
+
+async function loadCommittableNormals(tx: any, batchId: string): Promise<{ id: string; normalized: NormalizedRow }[]> {
+  const rows = await tx.select().from(importBatchRows)
+    .where(and(eq(importBatchRows.batchId, batchId), eq(importBatchRows.status, 'ok')));
+  return rows
+    .filter((r: { normalized: unknown }) => r.normalized)
+    .map((r: { id: string; normalized: unknown }) => ({ id: r.id, normalized: r.normalized as NormalizedRow }));
+}
+
+const signDecisionSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+
+intakeRoutes.get('/batches/:id/sign-convention', async (c) => {
+  requireSignConventionEnabled();
+  const user = c.get('user');
+  const { id: batchId } = c.req.param();
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    await requireBatch(tx, user.tenantId, batchId);
+    const normals = await loadCommittableNormals(tx, batchId);
+    const report = detectSignConvention(normals.map((r) => r.normalized));
+    return c.json({ batchId, report });
+  });
+});
+
+intakeRoutes.post('/batches/:id/sign-convention/confirm', requireMinimumRole('reviewer'), zValidator('json', signDecisionSchema), async (c) => {
+  requireSignConventionEnabled();
+  const user = c.get('user');
+  const { id: batchId } = c.req.param();
+  const { reason } = c.req.valid('json');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    const batch = await requireBatch(tx, user.tenantId, batchId);
+    if (batch.status === 'committed') throw new ConflictError('Batch is already committed');
+    const normals = await loadCommittableNormals(tx, batchId);
+    const report = detectSignConvention(normals.map((r) => r.normalized));
+    if (report.classification !== 'inverted') {
+      throw new ConflictError(`Nothing to confirm: batch sign convention is ${report.classification} (${report.code})`);
+    }
+    let item = await findOpenSignItem(tx, user.tenantId, batchId, 'SIGN_CONVENTION_INVERTED');
+    if (!item) item = await ensureSignReviewItem(tx, user.tenantId, batch, report);
+    const note = reason ?? 'Sign inversion confirmed by reviewer — commit will multiply every amount by −1.';
+    const updated = await resolveSignReviewItem(tx, user.tenantId, user.userId, item, 'confirmed', note, report, batchId);
+    await recordBatchEvent(tx, {
+      tenantId: user.tenantId, batchId, eventType: 'batch.sign_convention_confirmed',
+      actorUserId: user.userId, reason: note,
+      afterState: { decision: 'confirmed', totals: signTotalsByType(normals.map((r) => r.normalized)) },
+    });
+    return c.json({ item: updated, report });
+  });
+});
+
+intakeRoutes.post('/batches/:id/sign-convention/reject', requireMinimumRole('reviewer'), zValidator('json', signDecisionSchema), async (c) => {
+  requireSignConventionEnabled();
+  const user = c.get('user');
+  const { id: batchId } = c.req.param();
+  const { reason } = c.req.valid('json');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    const batch = await requireBatch(tx, user.tenantId, batchId);
+    if (batch.status === 'committed') throw new ConflictError('Batch is already committed');
+    const normals = await loadCommittableNormals(tx, batchId);
+    const report = detectSignConvention(normals.map((r) => r.normalized));
+    if (report.classification !== 'inverted') {
+      throw new ConflictError(`Nothing to reject: batch sign convention is ${report.classification} (${report.code})`);
+    }
+    let item = await findOpenSignItem(tx, user.tenantId, batchId, 'SIGN_CONVENTION_INVERTED');
+    if (!item) item = await ensureSignReviewItem(tx, user.tenantId, batch, report);
+    const note = reason ?? 'Sign inversion rejected by reviewer — fix the source file and re-upload.';
+    const updated = await resolveSignReviewItem(tx, user.tenantId, user.userId, item, 'rejected', note, report, batchId);
+    await recordBatchEvent(tx, {
+      tenantId: user.tenantId, batchId, eventType: 'batch.sign_convention_rejected',
+      actorUserId: user.userId, reason: note,
+      afterState: { decision: 'rejected', totals: signTotalsByType(normals.map((r) => r.normalized)) },
+    });
+    return c.json({ item: updated, report });
   });
 });
 
