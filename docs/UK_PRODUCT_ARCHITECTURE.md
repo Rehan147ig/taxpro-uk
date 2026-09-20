@@ -206,12 +206,60 @@ Legend: ✅ exists & wired · ⚠️ exists but partial/misleading/unwired · �
 | Golden UK case suite | ⚠️ | 9 real Companies House filings (eval:uk 9/9, mean 1.3 bp) are a strong nucleus; not yet an anonymised pilot-tenant golden suite with mapping-acceptance/override metrics |
 | Non-Vercel deployment | ✅ | Docker compose (local), railway.json, prod compose variant |
 
+### 4.8 Messy-data ingest hardening — Feature 1: XLSX with column mapping
+
+Status: ✅ shipped behind `INTAKE_XLSX` (default off, per-tenant via env).
+
+Flow: `POST /api/intake/xlsx-upload` (.xlsx/.xlsm, 20 MB, ZIP-sniffed,
+SHA-256, tenant-scoped storage + `source_documents` row, parser
+`intake-xlsx-v1`) → `POST /api/intake/preview` (`{ uploadId }` → sheet
+names, first 20 rows per sheet, header-row candidates where ≥ 60% of
+non-empty cells are non-numeric strings, plus `suggestedColumnMaps` when
+the client's fingerprint matches) → `POST /api/intake/column-map`
+(`{ uploadId, sheetName, headerRow, columnMap, entityId,
+accountingPeriodId }` → maps user-visible columns to canonical fields,
+persists the map in `intake_column_maps` keyed by
+`(tenant_id, client_fingerprint)`, converts rows to the same
+`ParsedCsvRow` shape and reuses `validateRow` + control totals unchanged,
+then creates an `xlsx` import batch with the usual `batch.created` /
+`batch.validated` events) → existing `POST
+/api/intake/batches/:id/commit` gate. `GET /api/intake/column-maps` looks
+up the remembered map by fingerprint for next period.
+
+Error codes (stable, machine-readable): `UNSUPPORTED_FORMAT` (legacy
+`.xls` or non-OOXML bytes rejected), `INVALID_FORMULA_REF` (formula
+references an external workbook like `[Budget.xlsx]Sheet1'!A1`),
+`INVALID_WORKBOOK`, `EMPTY_WORKBOOK`, `FILE_TOO_LARGE`,
+`ROW_LIMIT_EXCEEDED` (20,000 rows), `UNKNOWN_SHEET`, `UNKNOWN_COLUMN`,
+`UNKNOWN_FIELD`, `MISSING_REQUIRED` (map must cover `accountName`,
+`accountType`, `period`), `INVALID_HEADER_ROW`, `EMPTY_COLUMN_MAP` —
+plus the reused CSV validator codes (`MISSING_REQUIRED`,
+`INVALID_DATE`, `INVALID_AMOUNT`, `INVALID_CURRENCY`,
+`PERIOD_OUT_OF_RANGE`, `AMOUNT_MISMATCH`). Cell values (not display
+strings) are read; strings are trimmed + BOM-stripped; `(1,234.56)`
+parens-negatives normalize to `-1234.56`; physical row numbers are
+preserved as `lineNumber`. Merged headers need no special case (exceljs
+repeats the master value).
+
+Review-item flow: none new — XLSX batches flow through the existing
+suggestions → decide → commit gate, so sign-convention / bridge / asset
+gates (Features 2–4) apply unchanged. `client_fingerprint = sha256(JSON
+{ sortedHeaders, sheetName })` is deterministic and PII-free; RLS
+`USING (tenant_id = app_current_tenant_id())` on `intake_column_maps`;
+every query via `withTenantContext`; raw workbook bytes stay in the
+immutable upload artifact.
+
 ---
 
-## 5. Feature Flag: US Dormancy
+## 5. Feature Flags: US Dormancy + Intake Hardening
 
+- Intake hardening (`apps/api/src/config/features.ts`,
+  `GET /api/config/flags` → `{ INTAKE_XLSX, INTAKE_SIGN_CONVENTION,
+  INTAKE_PRIOR_BRIDGE, INTAKE_ASSET_REGISTER }`): all default off,
+  enabled per-tenant via env (`INTAKE_XLSX=true`, …). Intake routes enforce
+  them (`403 FEATURE_DISABLED` when off) so pilots unblock incrementally.
 - `TAXPRO_ENABLE_US` (default `false`) — `apps/api/src/config/env.ts` +
-  `apps/api/src/config/features.ts`.
+  `apps/api/src/config/features.ts` (planned; see `docs/UK_NON_GOALS.md`).
 - Exposed to the UI via `GET /api/config/flags` → `{ enableUs }`;
   web fails closed to UK-first defaults (`apps/web/src/lib/features.ts`).
 - What is gated when `false`:

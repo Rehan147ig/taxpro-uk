@@ -10,7 +10,7 @@ export const IMPORT_BATCH_STATUSES = [
 ] as const;
 export type ImportBatchStatus = (typeof IMPORT_BATCH_STATUSES)[number];
 
-export const IMPORT_SOURCE_TYPES = ['csv', 'netsuite', 'xero', 'warehouse', 'api'] as const;
+export const IMPORT_SOURCE_TYPES = ['csv', 'xlsx', 'netsuite', 'xero', 'warehouse', 'api'] as const;
 export type ImportSourceType = (typeof IMPORT_SOURCE_TYPES)[number];
 
 export const importBatches = pgTable('import_batches', {

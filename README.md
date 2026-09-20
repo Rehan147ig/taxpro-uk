@@ -153,11 +153,11 @@ taxpro-uk/
 | Review items | `/api/review-items` | review lifecycle — status machine, evidence request, human-only waiver |
 | Workbench | `/api/workbench` | setup → idempotent import → gated runs → recalc-as-new-version (lineage) → blockers; runs link to a committed import batch (`import_batch_id`, `PATCH /runs/:id/import-batch`, 409 once locked) |
 | Handoff | `/api/workbench/runs` … | handoff view, filing-ready, external filing record, manifest, package |
-| Intake | `/api/intake` | multipart upload → deterministic CSV validation → suggestions (tax memory + rules + advisory AI) → decide → gate-checked commit → supersede; adjustment approve/reject learning signals |
+| Intake | `/api/intake` | multipart upload → deterministic CSV validation → suggestions (tax memory + rules + advisory AI) → decide → gate-checked commit → supersede; adjustment approve/reject learning signals; XLSX via `/xlsx-upload` → `/preview` → `/column-map` (behind `INTAKE_XLSX`, remembered in `intake_column_maps`) |
 | Provenance | `/api/provenance` | results / documents / agents — knowledge-graph story behind any number |
 | Export | `/api/export` | journal workpapers per result — JSON + Xero/QBO/NetSuite/generic CSV (`GET /export/journals/:resultId?format=`) |
 | Demo | `/api/demo` | demo tenant data |
-| Config | `/api/config/flags` | feature flags |
+| Config | `/api/config/flags` | feature flags (`INTAKE_XLSX`, `INTAKE_SIGN_CONVENTION`, `INTAKE_PRIOR_BRIDGE`, `INTAKE_ASSET_REGISTER`; all default off) |
 
 **RBAC roles:** `admin` > `partner` > `reviewer` > `preparer` > `auditor` > `client_readonly`. Mutations require `preparer`+; read-only roles may only export approved/locked results.
 

@@ -17,9 +17,20 @@ import { taxAdjustments } from '../../db/schema/tax-adjustments.js';
 import { dataLineageEdges } from '../../db/schema/lineage.js';
 import { authMiddleware } from '../../lib/middleware/auth.js';
 import { requireMinimumRole } from '../../lib/middleware/rbac.js';
-import { BadRequestError, ConflictError, NotFoundError } from '../../lib/errors.js';
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../lib/errors.js';
 import { parseCsv, rowToRecord } from './csv.js';
 import { validateRow, buildBatchSummary } from './validate.js';
+import { isIntakeXlsxEnabled } from '../../config/features.js';
+import {
+  parseXlsxBuffer,
+  buildSheetPreviews,
+  mapSheetToParsedRows,
+  buildClientFingerprint,
+  CANONICAL_FIELDS,
+  XLSX_MAX_BYTES,
+} from './xlsx.js';
+import { intakeColumnMaps } from '../../db/schema/intake-column-maps.js';
+import { getStorage, buildStorageKey, sha256Hex as storageSha256 } from '../../lib/storage/index.js';
 import { generateSuggestionsForBatch } from './memory.js';
 import { recordBatchEvent, recordFeedback, requireBatch, listBatchEvents } from './audit.js';
 import { enrichSuggestionsWithAi } from './agent.js';
@@ -844,6 +855,339 @@ intakeRoutes.get('/lineage/run/:runId', async (c) => {
   return withTenantContext(user.tenantId, async (tx) => {
     const graph = await getLineageForRun(tx, user.tenantId, runId);
     return c.json(graph);
+  });
+});
+
+// ── XLSX ingest with column mapping (Feature 1, behind INTAKE_XLSX) ──
+
+const XLSX_PARSER_VERSION = 'intake-xlsx-v1';
+
+function requireXlsxEnabled(): void {
+  if (!isIntakeXlsxEnabled()) {
+    throw new ForbiddenError('XLSX ingest is disabled (INTAKE_XLSX off)');
+  }
+}
+
+async function loadUploadBytes(tx: any, tenantId: string, uploadId: string): Promise<{ bytes: Buffer; filename: string }> {
+  const [doc] = await tx.select().from(sourceDocuments)
+    .where(and(eq(sourceDocuments.tenantId, tenantId), eq(sourceDocuments.id, uploadId)))
+    .limit(1);
+  if (!doc) throw new NotFoundError('Upload', uploadId);
+  const storage = getStorage();
+  try {
+    const bytes = await storage.get(doc.storageKey);
+    return { bytes: Buffer.from(bytes), filename: doc.filename };
+  } catch {
+    throw new NotFoundError('Upload bytes', uploadId);
+  }
+}
+
+intakeRoutes.post('/xlsx-upload', requireMinimumRole('preparer'), async (c) => {
+  requireXlsxEnabled();
+  const user = c.get('user');
+  const form = await c.req.parseBody();
+  const file = form['file'];
+  if (!(file instanceof File)) {
+    throw new BadRequestError('No file uploaded. Use multipart field name "file".');
+  }
+  const filename = file.name;
+  const lower = filename.toLowerCase();
+  if ((lower.endsWith('.xls') && !lower.endsWith('.xlsx') && !lower.endsWith('.xlsm')) || (!lower.endsWith('.xlsx') && !lower.endsWith('.xlsm'))) {
+    throw new BadRequestError(`UNSUPPORTED_FORMAT: Unsupported file type: ${filename}. XLSX ingest accepts .xlsx and .xlsm only.`, { code: 'UNSUPPORTED_FORMAT' });
+  }
+  const buffer = Buffer.from(await file.arrayBuffer());
+  if (buffer.length > XLSX_MAX_BYTES) {
+    throw new BadRequestError(`File too large: ${(buffer.length / 1024 / 1024).toFixed(1)}MB. Maximum XLSX upload size is ${XLSX_MAX_BYTES / 1024 / 1024}MB.`);
+  }
+
+  const workbook = await parseXlsxBuffer(buffer, filename);
+  const previews = buildSheetPreviews(workbook);
+  const checksum = storageSha256(buffer);
+
+  const uploadId = await withTenantContext(user.tenantId, async (tx) => {
+    const docId = crypto.randomUUID();
+    const storageKey = buildStorageKey({
+      tenantId: user.tenantId,
+      documentType: 'intake_xlsx',
+      docId,
+      version: 1,
+      filename,
+    });
+    await getStorage().put(storageKey, buffer);
+    try {
+      await tx.insert(sourceDocuments).values({
+        id: docId,
+        tenantId: user.tenantId,
+        documentType: 'intake_xlsx',
+        filename,
+        mimeType: (file as File).type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        sizeBytes: buffer.length,
+        storageKey,
+        sha256: checksum,
+        provenance: 'manual_upload',
+        sourceSystem: 'xlsx-upload',
+        extractionStatus: 'not_required',
+        parserVersion: XLSX_PARSER_VERSION,
+        uploadedByUserId: user.userId,
+      });
+    } catch (err) {
+      try { await getStorage().delete(storageKey); } catch { /* best effort */ }
+      throw err;
+    }
+    return docId;
+  });
+
+  return c.json({
+    uploadId,
+    filename,
+    checksum,
+    sheets: previews.map((p) => p.name),
+    previews,
+  }, 201);
+});
+
+const previewSchema = z.object({
+  uploadId: z.string().uuid(),
+});
+
+intakeRoutes.post('/preview', zValidator('json', previewSchema), async (c) => {
+  requireXlsxEnabled();
+  const user = c.get('user');
+  const { uploadId } = c.req.valid('json');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    const { bytes, filename } = await loadUploadBytes(tx, user.tenantId, uploadId);
+    const workbook = await parseXlsxBuffer(bytes, filename);
+    const previews = buildSheetPreviews(workbook);
+
+    // Suggest the remembered column map when this client's layout matches.
+    const suggestions: Record<string, Record<string, string> | null> = {};
+    for (const preview of previews) {
+      const firstHeader = preview.headerCandidates[0];
+      if (firstHeader === undefined) {
+        suggestions[preview.name] = null;
+        continue;
+      }
+      const grid = workbook.sheets.find((s) => s.name === preview.name);
+      const headerRow = grid?.rows.find((r) => r.rowNumber === firstHeader);
+      const headers = headerRow?.cells ?? [];
+      if (headers.length === 0) {
+        suggestions[preview.name] = null;
+        continue;
+      }
+      const fingerprint = buildClientFingerprint(preview.name, headers);
+      const [saved] = await tx.select().from(intakeColumnMaps)
+        .where(and(eq(intakeColumnMaps.tenantId, user.tenantId), eq(intakeColumnMaps.clientFingerprint, fingerprint)))
+        .limit(1);
+      suggestions[preview.name] = (saved?.columnMap as Record<string, string> | null) ?? null;
+    }
+
+    return c.json({
+      uploadId,
+      sheets: previews.map((p) => p.name),
+      previews,
+      suggestedColumnMaps: suggestions,
+    });
+  });
+});
+
+const columnMapSchema = z.object({
+  uploadId: z.string().uuid(),
+  sheetName: z.string().min(1).max(255),
+  headerRow: z.number().int().min(1).max(1000),
+  columnMap: z.record(z.string(), z.string()),
+  entityId: z.string().uuid(),
+  accountingPeriodId: z.string().uuid(),
+  sourceSystem: z.string().max(100).optional(),
+  sourceReference: z.string().max(255).optional(),
+});
+
+intakeRoutes.post('/column-map', requireMinimumRole('preparer'), zValidator('json', columnMapSchema), async (c) => {
+  requireXlsxEnabled();
+  const user = c.get('user');
+  const input = c.req.valid('json');
+
+  // Validate canonical targets early for a stable error shape.
+  for (const target of Object.values(input.columnMap)) {
+    if (!(CANONICAL_FIELDS as readonly string[]).includes(target)) {
+      throw new BadRequestError(`UNKNOWN_FIELD: Canonical field "${target}" is not a known intake field (${CANONICAL_FIELDS.join(', ')}).`, { code: 'UNKNOWN_FIELD' });
+    }
+  }
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    const { bytes, filename } = await loadUploadBytes(tx, user.tenantId, input.uploadId);
+    const workbook = await parseXlsxBuffer(bytes, filename);
+    const sheet = workbook.sheets.find((s) => s.name === input.sheetName);
+    if (!sheet) {
+      throw new BadRequestError(`UNKNOWN_SHEET: Sheet "${input.sheetName}" was not found in the workbook.`, { code: 'UNKNOWN_SHEET' });
+    }
+
+    const { headers, rows } = mapSheetToParsedRows(sheet, input.headerRow, input.columnMap);
+
+    const [entity] = await tx.select({ id: entities.id, groupId: entities.groupId }).from(entities)
+      .where(and(eq(entities.tenantId, user.tenantId), eq(entities.id, input.entityId)))
+      .limit(1);
+    if (!entity) throw new NotFoundError('Entity', input.entityId);
+
+    const [period] = await tx.select().from(accountingPeriods)
+      .where(and(eq(accountingPeriods.tenantId, user.tenantId), eq(accountingPeriods.id, input.accountingPeriodId)))
+      .limit(1);
+    if (!period) throw new NotFoundError('Accounting period', input.accountingPeriodId);
+
+    const ctx = periodContext(period);
+    const records = rows.map((row) => ({
+      row,
+      record: rowToRecord(headers, row.values),
+      result: validateRow(row, headers, ctx),
+    }));
+
+    // Remember the map for next period: key (tenant_id, client_fingerprint).
+    const headerGridRow = sheet.rows.find((r) => r.rowNumber === input.headerRow);
+    const userHeaders = headerGridRow?.cells ?? Object.keys(input.columnMap);
+    const fingerprint = buildClientFingerprint(input.sheetName, userHeaders);
+    await tx.insert(intakeColumnMaps).values({
+      tenantId: user.tenantId,
+      clientFingerprint: fingerprint,
+      sheetName: input.sheetName,
+      headers: userHeaders,
+      columnMap: input.columnMap,
+      createdByUserId: user.userId,
+    }).onConflictDoUpdate({
+      target: [intakeColumnMaps.tenantId, intakeColumnMaps.clientFingerprint],
+      set: {
+        sheetName: input.sheetName,
+        headers: userHeaders,
+        columnMap: input.columnMap,
+        updatedAt: new Date(),
+      },
+    });
+
+    const fileChecksum = storageSha256(bytes);
+    const mappingChecksum = crypto.createHash('sha256')
+      .update(JSON.stringify({ sheetName: input.sheetName, headerRow: input.headerRow, columnMap: input.columnMap }))
+      .digest('hex');
+    const checksum = crypto.createHash('sha256').update(fileChecksum + mappingChecksum).digest('hex');
+    const sourceSystem = input.sourceSystem ?? 'xlsx-upload';
+
+    const [existing] = await tx.select().from(importBatches).where(and(
+      eq(importBatches.tenantId, user.tenantId),
+      eq(importBatches.entityId, input.entityId),
+      eq(importBatches.accountingPeriodId, input.accountingPeriodId),
+      eq(importBatches.sourceType, 'xlsx'),
+      eq(importBatches.sourceSystem, sourceSystem),
+      eq(importBatches.checksum, checksum),
+    )).limit(1);
+    if (existing) {
+      return c.json({ batch: existing, duplicate: true, clientFingerprint: fingerprint, message: 'An identical XLSX batch already exists for this entity and period.' }, 200);
+    }
+
+    const [batch] = await tx.insert(importBatches).values({
+      tenantId: user.tenantId,
+      entityId: input.entityId,
+      accountingPeriodId: input.accountingPeriodId,
+      sourceDocumentId: input.uploadId,
+      sourceType: 'xlsx',
+      sourceSystem,
+      sourceReference: input.sourceReference ?? `${filename}:${input.sheetName}:row${input.headerRow}`,
+      originalFilename: filename,
+      checksum,
+      storageKey: null,
+      parserVersion: XLSX_PARSER_VERSION,
+      rowCount: 0,
+      status: 'validating',
+      createdByUserId: user.userId,
+    }).returning();
+
+    await recordBatchEvent(tx, {
+      tenantId: user.tenantId, batchId: batch.id, eventType: 'batch.created',
+      actorUserId: user.userId,
+      afterState: { status: batch.status, filename, sheetName: input.sheetName, headerRow: input.headerRow, checksum, clientFingerprint: fingerprint },
+    });
+
+    for (const { row, record, result } of records) {
+      await tx.insert(importBatchRows).values({
+        tenantId: user.tenantId,
+        batchId: batch.id,
+        rowNumber: row.lineNumber,
+        raw: record,
+        normalized: result.normalized ?? null,
+        validation: result.issues.length > 0
+          ? { codes: result.issues.map((i) => i.code), issues: result.issues }
+          : null,
+        status: result.status,
+      });
+    }
+
+    const summary = buildBatchSummary(records.map(({ row, result }) => ({ lineNumber: row.lineNumber, result })));
+    const rowStatus = summary.errorCount === records.length && records.length > 0 ? 'failed' : 'ready_for_review';
+    const [updated] = await tx.update(importBatches).set({
+      rowCount: records.length,
+      status: rowStatus,
+      validationSummary: summary,
+      controlTotals: {
+        debit: summary.controlTotals.debitTotal,
+        credit: summary.controlTotals.creditTotal,
+        balanced: summary.controlTotals.balanced,
+      },
+      headers,
+      failureReason: rowStatus === 'failed' ? 'Every row failed validation' : null,
+      failedAt: rowStatus === 'failed' ? new Date() : null,
+    }).where(eq(importBatches.id, batch.id)).returning();
+
+    await recordBatchEvent(tx, {
+      tenantId: user.tenantId, batchId: batch.id, eventType: 'batch.validated',
+      actorType: 'system',
+      afterState: { status: rowStatus, errorCount: summary.errorCount, warningCount: summary.warningCount, okCount: summary.okCount, parser: XLSX_PARSER_VERSION },
+    });
+
+    await emitAgentEvent(tx, {
+      tenantId: user.tenantId,
+      userId: user.userId,
+      workflowName: 'platform',
+      correlationId: batch.id,
+    }, 'intake.batch_uploaded', {
+      batchId: batch.id,
+      rows: records.length,
+      documentId: input.uploadId,
+      parser: XLSX_PARSER_VERSION,
+    });
+
+    return c.json({
+      batch: updated,
+      duplicate: false,
+      clientFingerprint: fingerprint,
+      summary: {
+        rows: records.length,
+        ok: summary.okCount,
+        errors: summary.errorCount,
+        warnings: summary.warningCount,
+        controlTotals: summary.controlTotals,
+      },
+    }, 201);
+  });
+});
+
+intakeRoutes.get('/column-maps', async (c) => {
+  requireXlsxEnabled();
+  const user = c.get('user');
+  const fingerprint = c.req.query('fingerprint');
+  const sheetName = c.req.query('sheetName');
+  const headersParam = c.req.query('headers');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    let fp = fingerprint;
+    if (!fp && sheetName && headersParam) {
+      const headers = headersParam.split(',').map((h) => h.trim());
+      fp = buildClientFingerprint(sheetName, headers);
+    }
+    if (!fp) {
+      throw new BadRequestError('Provide ?fingerprint= or ?sheetName=&headers=a,b,c to look up a remembered map.');
+    }
+    const [saved] = await tx.select().from(intakeColumnMaps)
+      .where(and(eq(intakeColumnMaps.tenantId, user.tenantId), eq(intakeColumnMaps.clientFingerprint, fp)))
+      .limit(1);
+    if (!saved) throw new NotFoundError('Column map', fp);
+    return c.json({ map: saved });
   });
 });
 

@@ -162,6 +162,13 @@
                         "when":  1790005000000,
                         "tag":  "billing_sprint1_2",
                         "breakpoints":  true
+                    },
+                    {
+                        "idx":  23,
+                        "version":  "0023_intake_xlsx",
+                        "when":  1790006000000,
+                        "tag":  "intake_xlsx",
+                        "breakpoints":  true
                     }
                 ]
 }
