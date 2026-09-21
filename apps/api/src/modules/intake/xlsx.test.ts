@@ -226,6 +226,29 @@ describe('xlsx parser — values and formatting', () => {
     await expect(parseXlsxBuffer(buf, 'legacy.xls')).rejects.toThrow(/UNSUPPORTED_FORMAT/);
   });
 
+  it('rejects duplicated canonical targets with DUPLICATE_HEADER_COLLAPSE', async () => {
+    // Two physical columns share the merged header "Debit" — downstream
+    // rowToRecord would silently keep only the last value, so mapping fails
+    // loudly instead with a pointer to unmerge the header row.
+    const buf = await buildWorkbook((ws) => {
+      ws.mergeCells('D1:E1');
+      ws.getCell('A1').value = 'Account';
+      ws.getCell('B1').value = 'Number';
+      ws.getCell('C1').value = 'Type';
+      ws.getCell('D1').value = 'Debit';
+      ws.getCell('F1').value = 'Period';
+      ws.getCell('A2').value = 'Cash';
+      ws.getCell('B2').value = '1000';
+      ws.getCell('C2').value = 'Asset';
+      ws.getCell('D2').value = 100;
+      ws.getCell('E2').value = 50;
+      ws.getCell('F2').value = '2026-03-31';
+    });
+    const parsed = await parseXlsxBuffer(buf, 'dupes.xlsx');
+    const { Account, Number, Type, Debit, Period } = COLUMN_MAP;
+    expect(() => mapSheetToParsedRows(parsed.sheets[0], 1, { Account, Number, Type, Debit, Period })).toThrow(/DUPLICATE_HEADER_COLLAPSE/);
+  });
+
   it('strips BOM and trims strings like the CSV path', () => {
     expect(xlsxCellToString('﻿  Cash  ')).toBe('Cash');
   });

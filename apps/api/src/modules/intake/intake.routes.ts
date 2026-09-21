@@ -656,9 +656,23 @@ intakeRoutes.post('/batches/:id/commit', requireMinimumRole('preparer'), async (
             `SIGN_CONVENTION_INVERTED: batch signs are fully inverted (review item ${openItem.id}). A reviewer must confirm (applies a × −1 correction) or reject (fix the source file) before commit.`,
           );
         }
-        signBeforeTotals = signTotalsByType(normals);
-        const transformed = applySignInversion(normals);
-        signTransformByRowId = new Map(committableRows.map((r, i) => [(r as { id: string }).id, transformed[i]]));
+        // Re-verify on the live rows before transforming: the confirmation was
+        // recorded against an earlier read, and must only correct data that is
+        // still inverted. (No route mutates uncommitted rows today, so this is
+        // defense-in-depth against a future row-editing endpoint.)
+        const fresh = detectSignConvention(normals);
+        if (fresh.classification !== 'inverted') {
+          signReport = fresh;
+        } else {
+          signBeforeTotals = signTotalsByType(normals);
+          // Index by row id from the filtered list (not committableRows) so a
+          // null-normalized row can never misalign the transform.
+          const withIds = committableRows
+            .filter((r) => (r as { normalized: unknown }).normalized)
+            .map((r) => ({ id: (r as { id: string }).id, normalized: (r as { normalized: unknown }).normalized as NormalizedRow }));
+          const transformed = applySignInversion(withIds.map((w) => w.normalized));
+          signTransformByRowId = new Map(withIds.map((w, i) => [w.id, transformed[i]]));
+        }
       }
     }
 
@@ -1154,6 +1168,11 @@ intakeRoutes.post('/column-map', requireMinimumRole('preparer'), zValidator('jso
 
     const { headers, rows } = mapSheetToParsedRows(sheet, input.headerRow, input.columnMap);
 
+    // Cross-tenant guard is intentional, in two layers: the tenantId = filter
+    // below turns a foreign id into a 404 (no existence oracle), and RLS
+    // (withTenantContext + USING tenant_id = app_current_tenant_id()) is the
+    // deeper fail-closed backstop — the runtime role sees zero foreign rows
+    // even if a filter were ever dropped.
     const [entity] = await tx.select({ id: entities.id, groupId: entities.groupId }).from(entities)
       .where(and(eq(entities.tenantId, user.tenantId), eq(entities.id, input.entityId)))
       .limit(1);
@@ -1560,6 +1579,38 @@ async function activeMappingForAccount(tx: any, tenantId: string, accountId: str
 }
 
 /**
+ * Batched version of activeMappingForAccount: one query for many accounts
+ * (IN + in-memory latest-version join) instead of one round-trip per row.
+ * A 500-account chart would otherwise cost 500 sequential queries inside the
+ * commit transaction.
+ */
+async function activeMappingsForAccounts(tx: any, tenantId: string, accountIds: string[]) {
+  const ids = [...new Set(accountIds.filter(Boolean))];
+  if (ids.length === 0) return new Map<string, never>();
+  const rows = await tx.select().from(taxMappings)
+    .where(and(
+      eq(taxMappings.tenantId, tenantId),
+      inArray(taxMappings.accountId, ids),
+      eq(taxMappings.isActive, true),
+    ))
+    .orderBy(desc(taxMappings.version));
+  const latest = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    if (!latest.has(row.accountId)) latest.set(row.accountId, row);
+  }
+  return latest;
+}
+
+function toBridgeMapping(mapping: { id: string; taxAccountType: string; bookTreatment: string; timingCategory?: string | null } | null | undefined) {
+  return mapping ? {
+    id: mapping.id,
+    taxAccountType: mapping.taxAccountType,
+    bookTreatment: mapping.bookTreatment,
+    timingCategory: mapping.timingCategory ?? null,
+  } : null;
+}
+
+/**
  * Prior locked run's approved mapped accounts: the committed rows of the
  * currently-active batch for the run's accounting period (same "active
  * batch" definition as lib/import-batch-link.ts — committed, non-superseded,
@@ -1587,24 +1638,19 @@ async function loadPriorBridgeAccounts(tx: any, tenantId: string, run: { account
   if (batchId) {
     const rows = await tx.select().from(importBatchRows)
       .where(and(eq(importBatchRows.batchId, batchId), eq(importBatchRows.status, 'committed')));
+    const mappings = await activeMappingsForAccounts(tx, tenantId, rows.map((r: { accountId: string | null }) => r.accountId).filter(Boolean) as string[]);
     const out: PriorBridgeAccount[] = [];
     for (const row of rows) {
       const normalized = row.normalized as {
         accountExternalId?: string; accountName?: string; accountType?: string; balance?: number;
       } | null;
       if (!normalized) continue;
-      const mapping = row.accountId ? await activeMappingForAccount(tx, tenantId, row.accountId) : null;
       out.push({
         externalId: normalized.accountExternalId ?? '',
         name: normalized.accountName ?? '',
         accountType: normalized.accountType ?? '',
         closingBalance: normalized.balance ?? 0,
-        mapping: mapping ? {
-          id: mapping.id,
-          taxAccountType: mapping.taxAccountType,
-          bookTreatment: mapping.bookTreatment,
-          timingCategory: mapping.timingCategory ?? null,
-        } : null,
+        mapping: toBridgeMapping(row.accountId ? mappings.get(row.accountId) : null),
       });
     }
     return out;
@@ -1624,20 +1670,15 @@ async function loadPriorBridgeAccounts(tx: any, tenantId: string, run: { account
       eq(trialBalance.entityId, run.entityId),
       eq(trialBalance.period, run.period),
     ));
+  const tbMappings = await activeMappingsForAccounts(tx, tenantId, tbRows.map((r: { accountId: string }) => r.accountId));
   const out: PriorBridgeAccount[] = [];
   for (const row of tbRows) {
-    const mapping = await activeMappingForAccount(tx, tenantId, row.accountId);
     out.push({
       externalId: row.externalId ?? '',
       name: row.name,
       accountType: row.type,
       closingBalance: row.balance,
-      mapping: mapping ? {
-        id: mapping.id,
-        taxAccountType: mapping.taxAccountType,
-        bookTreatment: mapping.bookTreatment,
-        timingCategory: mapping.timingCategory ?? null,
-      } : null,
+      mapping: toBridgeMapping(tbMappings.get(row.accountId)),
     });
   }
   return out;

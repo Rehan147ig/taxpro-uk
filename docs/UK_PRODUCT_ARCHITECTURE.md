@@ -339,6 +339,37 @@ Error codes (stable): `NEW_ACCOUNT` (proposal), `MISSING_PRIOR_ACCOUNT`
 (warning), `POSSIBLE_RENAME` (warning + proposal), `OPENING_BALANCE_MISMATCH`
 (error, blocking).
 
+### 4.11 Intake review surface — Feature 4
+
+Status: ✅ shipped (UI only — no new tables, no migrations, no new
+dependencies; API cleanup folded in).
+
+Problem: Features 1–3 all terminate in reviewer decisions (column maps,
+sign confirm/reject, rename carry-forwards, mismatch resolves) that
+previously existed only as API endpoints — a pilot reviewer had no panel to
+act on them.
+
+Surface (`apps/web`, Intake page at `/intake`, all sections gated on live
+`GET /api/config/flags` so dark flags stay dark): an Excel card (upload
+`.xlsx`/`.xlsm` → sheet + header-row pick from detected candidates →
+per-canonical-field column editor prefilled from the remembered map →
+create batch); a sign panel on batch detail (live classification +
+per-type expected/observed totals table, confirm-×−1 / reject-with-reason
+for inverted batches); a bridge panel (new/missing/rename/mismatch counts,
+rename similarities with carried classifications, mismatch deltas with
+direction, resolve-with-reason per open item). The mixed-breakdown totals
+array is rendered as a table so reviewers can see which subset is
+wrong-signed. `apps/web/e2e/review-surface.spec.ts` asserts the sections
+follow the flags in both states.
+
+API cleanup folded in (same invariant-preserving pattern): merged-header
+duplicates now fail loudly with `DUPLICATE_HEADER_COLLAPSE` (previously
+`rowToRecord` silently kept the last value); prior-bridge mapping lookup
+collapsed from N+1 to a single `IN (...)` fetch; the sign gate re-verifies
+detection on live rows before applying the × −1 transform and indexes the
+transform by row id; the XLSX column-map route documents its two-layer
+tenant guard (tenant-scoped fetch → 404, RLS fail-closed backstop).
+
 ---
 
 ## 5. Feature Flags: US Dormancy + Intake Hardening
