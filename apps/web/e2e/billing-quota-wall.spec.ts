@@ -75,6 +75,7 @@ test('quota wall: manual provider shows sales instructions, hosted shows checkou
   await expect(dialog.getByText(/Manual billing: contact sales/)).toBeVisible();
 
   // Hosted branch: checkout URL renders as a real link (no surprise redirect).
+  // Re-trigger the wall for a fresh modal — the first checkout is already done.
   await page.route('**/api/billing/checkout', (route) =>
     route.fulfill({
       status: 200, contentType: 'application/json',
@@ -84,6 +85,10 @@ test('quota wall: manual provider shows sales instructions, hosted shows checkou
       }),
     }),
   );
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole('button', { name: 'Run Provision Engine' }).click();
+  await expect(dialog).toBeVisible({ timeout: 15_000 });
   await dialog.getByRole('button', { name: 'Upgrade to professional' }).click();
   const link = dialog.getByRole('link', { name: /Continue to secure checkout/ });
   await expect(link).toBeVisible();

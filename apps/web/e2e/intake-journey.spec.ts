@@ -29,8 +29,10 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
   const consoleErrors: string[] = [];
   const adminContext = await browser.newContext();
   const page = await adminContext.newPage();
-  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   await login(page, ADMIN_EMAIL);
+  // Listeners attach post-login: the dashboard fires unauthenticated fetches
+  // (401s) before sign-in, which is pre-existing noise, not journey signal.
+  page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
 
   const adminToken = await page.evaluate(() => localStorage.getItem('taxpro_token'));
   const authHeader = { Authorization: `Bearer ${adminToken}` };
@@ -54,21 +56,32 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
   await expect(page.getByRole('heading', { name: 'Data Intake' })).toBeVisible({ timeout: 30_000 });
 
   // Pin the Apex entity so the batch lands in the scenario tenant slice.
-  const entitySelect = page.locator('select').filter({ has: page.getByRole('option', { name: 'Apex Manufacturing Ltd' }) }).first();
-  await entitySelect.selectOption({ label: 'Apex Manufacturing Ltd' });
+  // NOTE: entity options render as "<name> (<jurisdiction>)", so match by
+  // regex and select by full label — exact-name matching never resolves.
+  const apexOption = page.getByRole('option', { name: /Apex Manufacturing Ltd/ }).first();
+  await expect(apexOption).toBeAttached({ timeout: 30_000 });
+  const entitySelect = page.locator('select').filter({ has: page.getByRole('option', { name: /Apex Manufacturing Ltd/ }) }).first();
+  await entitySelect.selectOption({ label: 'Apex Manufacturing Ltd (UK_FRS102)' });
 
   const here = dirname(fileURLToPath(import.meta.url));
   await page.locator('input[accept=".xlsx,.xlsm"]').setInputFiles(join(here, 'fixtures', 'tb-offset-headers.xlsx'));
   await expect(page.getByText(/Workbook parsed: 2 sheet/)).toBeVisible({ timeout: 30_000 });
 
-  await page.getByLabel(/Sheet \(\d+\)/).selectOption('TB');
-  await page.getByLabel('Header row').selectOption('3');
+  // NOTE: selects are located structurally (label text → inner select) rather
+  // than getByLabel: wrapped-label accessible names include option text, so
+  // full-name matching is unreliable ('period' collides with 'periodEnd').
+  const labeledSelect = (pattern: string | RegExp) =>
+    page.locator('label', { hasText: pattern }).locator('select');
+  await labeledSelect(/^Sheet \(\d+\)/i).selectOption('TB');
+  await labeledSelect(/^Header row/i).selectOption('3');
   const columnMap: Record<string, string> = {
     accountName: 'Account', accountNumber: 'Number', accountType: 'Type',
     debit: 'Debit', credit: 'Credit', period: 'Period',
   };
+  const required = new Set(['accountName', 'accountType', 'period']);
   for (const [canonical, userCol] of Object.entries(columnMap)) {
-    await page.getByLabel(new RegExp(`^${canonical}`)).selectOption(userCol);
+    const suffix = required.has(canonical) ? ' \\*' : '';
+    await labeledSelect(new RegExp(`^${canonical}${suffix}`, 'i')).selectOption(userCol);
   }
   await page.getByRole('button', { name: 'Create import batch from sheet' }).click();
   await expect(page.getByText(/XLSX batch created/)).toBeVisible({ timeout: 30_000 });
@@ -79,7 +92,13 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
     await expect(page.getByText(/Sign convention: standard/)).toBeVisible({ timeout: 30_000 });
   }
 
-  await page.getByRole('button', { name: 'Commit batch' }).click();
+  // Idempotent re-runs: checksum dedupe may return an already-committed batch
+  // from a previous journey run. That *is* the committed end-state — assert
+  // it and continue instead of re-committing.
+  const commitButton = page.getByRole('button', { name: 'Commit batch' });
+  if ((await commitButton.count()) > 0 && await commitButton.isEnabled().catch(() => false)) {
+    await commitButton.click();
+  }
   await expect(page.getByText('committed', { exact: false }).first()).toBeVisible({ timeout: 30_000 });
 
   // ══ Step 2: Workbench marginal-relief calculation on Apex ══
@@ -92,10 +111,15 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
   const apexAp = setup.accountingPeriods.find((p: any) => p.entityId === apex.id && p.startDate === '2026-01-01');
   const apexTp = setup.taxPeriods.find((p: any) => p.entityId === apex.id && p.startDate === '2026-01-01');
   const apexDoc = setup.documents.find((d: any) => d.filename.includes('apex')) ?? setup.documents[0];
-  await page.getByLabel('UK entity').selectOption(apex.id);
-  if (apexAp) await page.getByLabel('Accounting period').selectOption(apexAp.id);
-  if (apexTp) await page.getByLabel('Tax period').selectOption(apexTp.id);
-  if (apexDoc) await page.getByLabel('Source document').selectOption(apexDoc.id);
+  // Refresh resets the scope dropdowns to tenant defaults (proven by trace),
+  // so (re)select the Apex scope every time before importing or running.
+  const selectApexScope = async () => {
+    await page.getByLabel('UK entity').selectOption(apex.id);
+    if (apexAp) await page.getByLabel('Accounting period').selectOption(apexAp.id);
+    if (apexTp) await page.getByLabel('Tax period').selectOption(apexTp.id);
+    if (apexDoc) await page.getByLabel('Source document').selectOption(apexDoc.id);
+  };
+  await selectApexScope();
 
   // Apex-scale chart reusing the scenario's namespaced accounts (which carry
   // active mappings), so the run computes instead of excluding everything.
@@ -135,6 +159,7 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
     await expect(page.getByRole('button', { name: 'Approve & Apply' })).toHaveCount(0, { timeout: 30_000 });
     await page.getByRole('link', { name: 'Workbench', exact: true }).click();
     await page.getByRole('button', { name: 'Refresh' }).click();
+    await selectApexScope();
     await page.getByRole('button', { name: 'Run Workbench Calculation' }).click();
   }
 
@@ -168,8 +193,8 @@ test('full operator lifecycle: excel intake -> commit -> workbench marginal reli
   // ══ Step 4: partner sign-off + lock (segregation of duties) ══
   const partnerContext = await browser.newContext();
   const partnerPage = await partnerContext.newPage();
-  partnerPage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   await login(partnerPage, PARTNER_EMAIL, PASSWORD);
+  partnerPage.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   await partnerPage.goto(`/runs/${runId}`);
   await expect(partnerPage.getByRole('button', { name: 'Partner Sign-off' })).toBeVisible({ timeout: 30_000 });
   await partnerPage.getByRole('button', { name: 'Partner Sign-off' }).click();
