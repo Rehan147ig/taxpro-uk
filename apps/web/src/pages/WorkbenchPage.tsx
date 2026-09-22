@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { workbench, handoff } from '../api/client';
+import { workbench, handoff, quotaDetailsFromError, type QuotaDetails } from '../api/client';
 import { RunStatusBadge } from '../components/RunStatusBadge';
 import XeroPushPanel from '../components/XeroPushPanel';
+import QuotaWall from '../components/QuotaWall';
 
 const SAMPLE_CSV = [
   '4000,Sales revenue,Income,Income,-4800000',
@@ -61,6 +62,7 @@ export default function WorkbenchPage() {
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<any>(null);
   const [blocked, setBlocked] = useState<any>(null);
+  const [quota, setQuota] = useState<QuotaDetails | null>(null);
 
   const [view, setView] = useState<any>(null);
   const [viewing, setViewing] = useState(false);
@@ -145,6 +147,7 @@ export default function WorkbenchPage() {
     setError(null);
     setRunResult(null);
     setBlocked(null);
+    setQuota(null);
     try {
       const res = await workbench.run({
         idempotencyKey: idempotencyKey('run'),
@@ -158,11 +161,24 @@ export default function WorkbenchPage() {
         load();
       } else if (res.body.blocked) {
         setBlocked(res.body);
+      } else if (res.status === 402 && (res.body as any)?.details?.upgradeRequired === true) {
+        // Billing quota wall: usage + plan details feed the upgrade modal.
+        const details = (res.body as any).details;
+        setQuota({
+          message: (res.body as any).error || 'Included runs used.',
+          planCode: details.planCode,
+          subscriptionStatus: details.subscriptionStatus,
+          includedRunsPerMonth: details.includedRunsPerMonth,
+          usedRuns: details.usedRuns,
+          upgradeRequired: true,
+        });
       } else {
         setError(res.body.error || 'Calculation run failed');
       }
     } catch (err: any) {
-      setError(err.message || 'Calculation run failed');
+      const details = quotaDetailsFromError(err);
+      if (details) setQuota(details);
+      else setError(err.message || 'Calculation run failed');
     } finally {
       setRunning(false);
     }
@@ -173,16 +189,29 @@ export default function WorkbenchPage() {
     if (!runId) return;
     setRecalculating(true);
     setError(null);
+    setQuota(null);
     try {
       const res = await workbench.recalculate(runId, idempotencyKey('recalc'));
       if (res.ok) {
         setRunResult(res.body);
         load();
+      } else if (res.status === 402 && (res.body as any)?.details?.upgradeRequired === true) {
+        const details = (res.body as any).details;
+        setQuota({
+          message: (res.body as any).error || 'Included runs used.',
+          planCode: details.planCode,
+          subscriptionStatus: details.subscriptionStatus,
+          includedRunsPerMonth: details.includedRunsPerMonth,
+          usedRuns: details.usedRuns,
+          upgradeRequired: true,
+        });
       } else {
         setError(res.body.error || 'Recalculation failed');
       }
     } catch (err: any) {
-      setError(err.message || 'Recalculation failed');
+      const details = quotaDetailsFromError(err);
+      if (details) setQuota(details);
+      else setError(err.message || 'Recalculation failed');
     } finally {
       setRecalculating(false);
     }
@@ -330,6 +359,7 @@ export default function WorkbenchPage() {
       </div>
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-card p-4 text-xs font-medium">{error}</div>}
+      {quota && <QuotaWall quota={quota} onClose={() => setQuota(null)} />}
       {loading && <p className="text-xs text-gray-500">Loading workbench setup…</p>}
 
       {setup && (

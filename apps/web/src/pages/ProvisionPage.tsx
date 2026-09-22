@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { provision as provApi } from '../api/client';
+import { provision as provApi, quotaDetailsFromError, type QuotaDetails } from '../api/client';
 import { webProvisionRunCounter } from '../observability';
 import { RunStatusBadge } from '../components/RunStatusBadge';
+import QuotaWall from '../components/QuotaWall';
 
 export default function ProvisionPage() {
   const [period, setPeriod] = useState('2024-01-01');
@@ -14,6 +15,7 @@ export default function ProvisionPage() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
   const [entitiesError, setEntitiesError] = useState<string | null>(null);
+  const [quota, setQuota] = useState<QuotaDetails | null>(null);
 
   useEffect(() => {
     provApi.entities().then(setEntities).catch((err: any) => setEntitiesError(err.message || 'Failed to load entities'));
@@ -27,12 +29,17 @@ export default function ProvisionPage() {
     setLoading(true);
     setError('');
     setResult(null);
+    setQuota(null);
     try {
       const data = await provApi.run({ period, endPeriod: endPeriod || undefined, entityId: entityId || undefined });
       setResult(data);
       webProvisionRunCounter.add(1, { outcome: 'success' });
     } catch (err: any) {
-      setError(err.message);
+      // 402 quota wall opens the upgrade modal (with usage + plan details);
+      // every other failure keeps the existing inline banner behavior.
+      const details = quotaDetailsFromError(err);
+      if (details) setQuota(details);
+      else setError(err.message);
       webProvisionRunCounter.add(1, { outcome: 'error' });
     } finally {
       setLoading(false);
@@ -110,6 +117,8 @@ export default function ProvisionPage() {
           {error}
         </div>
       )}
+
+      {quota && <QuotaWall quota={quota} onClose={() => setQuota(null)} />}
 
       {result && (
         <div className="space-y-6">

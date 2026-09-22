@@ -13,6 +13,23 @@ export function clearToken() {
   localStorage.removeItem('taxpro_token');
 }
 
+/**
+ * Thrown by apiClient for non-2xx responses. Carries the HTTP status and the
+ * parsed body alongside the user-facing message, so callers can branch on
+ * structured failures (e.g. the 402 quota wall) without changing what any
+ * existing catch site displays — messages are byte-identical to before.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: any;
+  constructor(status: number, message: string, body: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.body = body;
+  }
+}
+
 export async function apiClient<T>(
   path: string,
   options: RequestInit = {},
@@ -30,15 +47,48 @@ export async function apiClient<T>(
     const errorBody = await res.json().catch(() => ({ error: 'Request failed' }));
     // Genericize access-denied errors to avoid leaking internal details
     if (res.status === 403 || res.status === 401) {
-      throw new Error('You do not have access to this provision or its records.');
+      throw new ApiError(res.status, 'You do not have access to this provision or its records.', errorBody);
     }
     if (res.status === 409) {
-      throw new Error(errorBody.error || 'This action cannot be completed because the provision is locked.');
+      throw new ApiError(res.status, errorBody.error || 'This action cannot be completed because the provision is locked.', errorBody);
     }
-    throw new Error(errorBody.error || `HTTP ${res.status}`);
+    throw new ApiError(res.status, errorBody.error || `HTTP ${res.status}`, errorBody);
   }
 
   return res.json();
+}
+
+/**
+ * Structured quota details from a 402 Payment Required response.
+ * NOTE: the API nests the entitlement fields under `details`
+ * ({error, details: {planCode, ...}} via the error-handler middleware) —
+ * read them there, not at the top level.
+ */
+export interface QuotaDetails {
+  message: string;
+  planCode?: string;
+  subscriptionStatus?: string;
+  includedRunsPerMonth?: number;
+  usedRuns?: number;
+  upgradeRequired: boolean;
+}
+
+/** Returns quota details when `e` is a 402 upgrade wall, else null. */
+export function quotaDetailsFromError(e: unknown): QuotaDetails | null {
+  if (e instanceof ApiError && e.status === 402) {
+    const details = e.body?.details ?? {};
+    if (details.upgradeRequired === true) {
+      return {
+        message: typeof e.body?.error === 'string' ? e.body.error : 'Included runs used.',
+        planCode: details.planCode,
+        subscriptionStatus: details.subscriptionStatus,
+        includedRunsPerMonth: details.includedRunsPerMonth,
+        usedRuns: details.usedRuns,
+        upgradeRequired: true,
+      };
+    }
+  }
+  return null;
 }
 
 // Like apiClient but returns the parsed body on any status (used where a
