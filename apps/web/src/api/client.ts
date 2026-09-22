@@ -372,6 +372,12 @@ export const handoff = {  view: (runId: string) => apiClient<HandoffView>(`/hand
   },
 };
 
+// Feature flags (messy-data hardening pass and beyond).
+// Server: apps/api/src/modules/config/flags.routes.ts at /api/config.
+export const config = {
+  flags: () => apiClient<Record<string, boolean>>('/config/flags'),
+};
+
 // Enterprise intake: CSV batches → validate → suggestions → commit.
 // Server: apps/api/src/modules/intake/intake.routes.ts mounted at /api/intake.
 export const intake = {
@@ -407,6 +413,39 @@ export const intake = {
     apiClient<any>(`/intake/adjustments/${id}/approve`, { method: 'POST', body: JSON.stringify({ reason }) }),
   rejectAdjustment: (id: string, reason?: string) =>
     apiClient<any>(`/intake/adjustments/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  // Feature 1 — XLSX ingest with column mapping (behind INTAKE_XLSX).
+  xlsxUpload: async (file: File) => {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE_URL}/intake/xlsx-upload`, { method: 'POST', headers, body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: 'XLSX upload failed' }));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+  xlsxPreview: (uploadId: string) =>
+    apiClient<{ uploadId: string; sheets: string[]; previews: any[]; suggestedColumnMaps: Record<string, any> }>(
+      '/intake/preview', { method: 'POST', body: JSON.stringify({ uploadId }) }),
+  xlsxColumnMap: (payload: {
+    uploadId: string; sheetName: string; headerRow: number; columnMap: Record<string, string>;
+    entityId: string; accountingPeriodId: string; sourceReference?: string;
+  }) => apiClient<any>('/intake/column-map', { method: 'POST', body: JSON.stringify(payload) }),
+  // Feature 2 — sign-convention detection (behind INTAKE_SIGN_CONVENTION).
+  signReport: (batchId: string) =>
+    apiClient<{ batchId: string; report: any }>(`/intake/batches/${batchId}/sign-convention`),
+  signConfirm: (batchId: string, reason?: string) =>
+    apiClient<any>(`/intake/batches/${batchId}/sign-convention/confirm`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  signReject: (batchId: string, reason?: string) =>
+    apiClient<any>(`/intake/batches/${batchId}/sign-convention/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  // Feature 3 — prior-period bridge (behind INTAKE_PRIOR_BRIDGE).
+  bridgeReport: (batchId: string) =>
+    apiClient<{ batchId: string; priorRunId: string | null; result: any }>(`/intake/batches/${batchId}/prior-bridge`),
+  bridgeResolveItem: (batchId: string, itemId: string, reason: string) =>
+    apiClient<any>(`/intake/batches/${batchId}/bridge/items/${itemId}/resolve`, { method: 'POST', body: JSON.stringify({ reason }) }),
 };
 
 // Lineage / provenance viewer.

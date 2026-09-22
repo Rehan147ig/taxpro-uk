@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { intake, provision, periods } from '../api/client';
+import { intake, provision, periods, config as featureFlags, reviewItems as reviewApi } from '../api/client';
+
+// Canonical intake fields for the XLSX column-map editor (mirrors
+// CANONICAL_FIELDS in apps/api/src/modules/intake/xlsx.ts).
+const CANONICAL_FIELDS = [
+  'accountName', 'accountNumber', 'accountType', 'debit', 'credit', 'balance',
+  'period', 'periodEnd', 'currency', 'entityName', 'entityExternalId',
+  'accountExternalId', 'detailType',
+];
 
 const BATCH_STATUS_COLORS: Record<string, string> = {
   draft: 'bg-gray-100 text-gray-700 border-gray-200',
@@ -60,6 +68,23 @@ export default function IntakePage() {
   const [reviewTarget, setReviewTarget] = useState<{ id: string; decision: 'approved' | 'rejected' } | null>(null);
   const [reviewReason, setReviewReason] = useState('');
 
+  // Feature flags for the messy-data hardening pass (all default off).
+  const [flags, setFlags] = useState<Record<string, boolean> | null>(null);
+
+  // Feature 1 — XLSX upload → preview → column-map state.
+  const [xlsxPreview, setXlsxPreview] = useState<{
+    uploadId: string; sheets: string[]; previews: any[]; suggestedColumnMaps: Record<string, any>;
+  } | null>(null);
+  const [xlsxSheet, setXlsxSheet] = useState('');
+  const [xlsxHeaderRow, setXlsxHeaderRow] = useState<number | null>(null);
+  const [xlsxMap, setXlsxMap] = useState<Record<string, string>>({});
+
+  // Features 2–3 — per-batch deterministic check reports + bridge items.
+  const [signReport, setSignReport] = useState<any | null>(null);
+  const [bridgeReport, setBridgeReport] = useState<{ priorRunId: string | null; result: any } | null>(null);
+  const [bridgeItems, setBridgeItems] = useState<any[]>([]);
+  const [decisionReason, setDecisionReason] = useState('');
+
   const load = async () => {
     const [batchRes, adjRes] = await Promise.all([
       intake.batches(),
@@ -76,6 +101,7 @@ export default function IntakePage() {
           provision.entities(),
           periods.accounting(),
         ]);
+        featureFlags.flags().then(setFlags).catch(() => setFlags({}));
         setEntities(ents);
         setAccountingPeriods(aps);
         const uk = ents.find((e: any) => ['UK_FRS102', 'UK_FRS102_S29', 'UK'].includes(e.taxJurisdiction ?? ''));
@@ -117,6 +143,9 @@ export default function IntakePage() {
   const selectBatch = async (id: string) => {
     setSelectedId(id);
     setError(null);
+    setSignReport(null);
+    setBridgeReport(null);
+    setBridgeItems([]);
     try {
       const [detail, rows, sugg] = await Promise.all([
         intake.batch(id),
@@ -126,9 +155,119 @@ export default function IntakePage() {
       setBatchDetail(detail);
       setErrorRows(rows.rows.filter((r: any) => r.status === 'error' || r.status === 'warning'));
       setSuggestions(sugg.suggestions);
+      await loadMessyData(id);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load batch');
     }
+  };
+
+  // Deterministic intake checks (Features 2–3). Each fetch is best-effort:
+  // a 403 means the flag is off and the panel simply stays hidden.
+  const loadMessyData = async (id: string) => {
+    const [sign, bridge, items] = await Promise.all([
+      intake.signReport(id).catch(() => null),
+      intake.bridgeReport(id).catch(() => null),
+      reviewApi.list().catch(() => [] as any[]),
+    ]);
+    if (sign) setSignReport(sign.report);
+    if (bridge) setBridgeReport({ priorRunId: bridge.priorRunId, result: bridge.result });
+    if (Array.isArray(items)) {
+      setBridgeItems(items.filter((i: any) => i.sourceRef === `import_batch:${id}`));
+    }
+  };
+
+  const decideSign = (decision: 'confirm' | 'reject') =>
+    runAction(`sign-${decision}`, async () => {
+      if (!selectedId) return;
+      if (decision === 'confirm') await intake.signConfirm(selectedId, decisionReason || undefined);
+      else await intake.signReject(selectedId, decisionReason || undefined);
+      setDecisionReason('');
+      await loadMessyData(selectedId);
+    }, `Sign inversion ${decision} recorded by reviewer.`);
+
+  const resolveBridgeItem = (itemId: string) =>
+    runAction(`bridge-${itemId}`, async () => {
+      if (!selectedId) return;
+      if (!decisionReason.trim()) throw new Error('A resolution reason is required.');
+      await intake.bridgeResolveItem(selectedId, itemId, decisionReason.trim());
+      setDecisionReason('');
+      await loadMessyData(selectedId);
+    }, 'Bridge item resolved with reason.');
+
+  const uploadXlsx = async (file: File) => {
+    const lower = file.name.toLowerCase();
+    if (!lower.endsWith('.xlsx') && !lower.endsWith('.xlsm')) {
+      setError(`Unsupported file type: ${file.name}. XLSX ingest accepts .xlsx and .xlsm only.`);
+      return;
+    }
+    setUploading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const preview = await intake.xlsxUpload(file);
+      setXlsxPreview(preview);
+      const firstSheet = preview.sheets[0] ?? '';
+      setXlsxSheet(firstSheet);
+      const firstPreview = preview.previews.find((p: any) => p.name === firstSheet);
+      const headerRow = firstPreview?.headerCandidates?.[0] ?? 1;
+      setXlsxHeaderRow(headerRow);
+      const headerCells: string[] =
+        firstPreview?.firstRows?.find((r: any) => r.rowNumber === headerRow)?.cells ?? [];
+      const suggested = preview.suggestedColumnMaps?.[firstSheet] as Record<string, string> | null;
+      const draft: Record<string, string> = {};
+      for (const canonical of CANONICAL_FIELDS) {
+        if (suggested) {
+          const userCol = Object.keys(suggested).find((k) => suggested[k] === canonical);
+          if (userCol && headerCells.includes(userCol)) draft[canonical] = userCol;
+        }
+        if (!draft[canonical]) {
+          const guess = headerCells.find((h) => h.toLowerCase().replace(/[\s_-]/g, '') === canonical.toLowerCase());
+          if (guess) draft[canonical] = guess;
+        }
+      }
+      setXlsxMap(draft);
+      setNotice(`Workbook parsed: ${preview.sheets.length} sheet(s). Pick the TB sheet, confirm the header row, map columns, then create the batch.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'XLSX upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const pickXlsxSheet = (sheet: string) => {
+    setXlsxSheet(sheet);
+    const preview = xlsxPreview?.previews.find((p: any) => p.name === sheet);
+    const headerRow = preview?.headerCandidates?.[0] ?? 1;
+    setXlsxHeaderRow(headerRow);
+    setXlsxMap({});
+  };
+
+  const createXlsxBatch = async () => {
+    if (!xlsxPreview || !xlsxSheet || !xlsxHeaderRow) {
+      setError('Upload a workbook and pick a sheet and header row first.');
+      return;
+    }
+    if (!entityId || !accountingPeriodId) {
+      setError('Select an entity and accounting period before creating the batch.');
+      return;
+    }
+    const columnMap: Record<string, string> = {};
+    for (const [canonical, userCol] of Object.entries(xlsxMap)) {
+      if (userCol) columnMap[userCol] = canonical;
+    }
+    await runAction('xlsx-map', async () => {
+      const res = await intake.xlsxColumnMap({
+        uploadId: xlsxPreview.uploadId,
+        sheetName: xlsxSheet,
+        headerRow: xlsxHeaderRow,
+        columnMap,
+        entityId,
+        accountingPeriodId,
+      });
+      setXlsxPreview(null);
+      if (res.batch?.id) await selectBatch(res.batch.id);
+      return res;
+    }, `XLSX batch created from sheet "${xlsxSheet}" — column map remembered for this client layout.`);
   };
 
   const runAction = async (key: string, fn: () => Promise<any>, successMsg?: string) => {
@@ -232,6 +371,71 @@ export default function IntakePage() {
         </div>
       </div>
 
+      {/* Feature 1 — XLSX ingest with column mapping (behind INTAKE_XLSX) */}
+      {flags?.INTAKE_XLSX && (
+        <div className="bg-white rounded-card border border-gray-200 p-4 shadow-sm space-y-3">
+          <div>
+            <h3 className="text-base font-serif font-semibold text-[#0A192F] tracking-tight">Excel trial balance</h3>
+            <p className="text-[10px] text-gray-500">XLSX/XLSM up to 20 MB · merged headers, offset header rows and junk sheets handled · map remembered per client layout</p>
+          </div>
+          <label className="inline-block">
+            <input type="file" accept=".xlsx,.xlsm" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadXlsx(f); e.target.value = ''; }} />
+            <span className="text-xs font-semibold bg-[#0A192F] text-white px-4 py-2 rounded-button cursor-pointer hover:bg-[#112240]">
+              {uploading ? 'Parsing…' : 'Upload Excel workbook'}
+            </span>
+          </label>
+          {xlsxPreview && (
+            <div className="space-y-3 border-t border-gray-100 pt-3">
+              <div className="flex flex-wrap gap-4 items-end">
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Sheet ({xlsxPreview.sheets.length})</span>
+                  <select value={xlsxSheet} onChange={(e) => pickXlsxSheet(e.target.value)}
+                    className="border border-gray-200 rounded-button px-2 py-1.5 text-xs bg-white min-w-52">
+                    {xlsxPreview.sheets.map((s: string) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Header row</span>
+                  <select value={xlsxHeaderRow ?? ''} onChange={(e) => setXlsxHeaderRow(Number(e.target.value))}
+                    className="border border-gray-200 rounded-button px-2 py-1.5 text-xs bg-white">
+                    {(xlsxPreview.previews.find((p: any) => p.name === xlsxSheet)?.headerCandidates ?? [1]).map((r: number) => (
+                      <option key={r} value={r}>Row {r}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {CANONICAL_FIELDS.map((canonical) => {
+                  const headerCells: string[] =
+                    xlsxPreview.previews.find((p: any) => p.name === xlsxSheet)?.firstRows
+                      ?.find((r: any) => r.rowNumber === xlsxHeaderRow)?.cells ?? [];
+                  const required = ['accountName', 'accountType', 'period'].includes(canonical);
+                  return (
+                    <label key={canonical} className="flex flex-col gap-1 text-xs">
+                      <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+                        {canonical}{required ? ' *' : ''}
+                      </span>
+                      <select value={xlsxMap[canonical] ?? ''} onChange={(e) => setXlsxMap({ ...xlsxMap, [canonical]: e.target.value })}
+                        className="border border-gray-200 rounded-button px-2 py-1.5 text-xs bg-white">
+                        <option value="">— ignore —</option>
+                        {headerCells.map((h: string, i: number) => (
+                          <option key={`${i}-${h}`} value={h}>{h || `(empty col ${i + 1})`}</option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
+              </div>
+              <button onClick={createXlsxBatch} disabled={working !== null}
+                className="text-[10px] font-semibold bg-green-700 text-white px-3 py-1.5 rounded-button disabled:opacity-50">
+                {working === 'xlsx-map' ? 'Creating…' : 'Create import batch from sheet'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Batch queue */}
         <div className="bg-white rounded-card border border-gray-200 overflow-hidden shadow-sm">
@@ -304,6 +508,107 @@ export default function IntakePage() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Feature 2 — sign-convention check (behind INTAKE_SIGN_CONVENTION) */}
+              {flags?.INTAKE_SIGN_CONVENTION && signReport && (
+                <div className={`border rounded-card overflow-hidden ${signReport.classification === 'standard' ? 'border-green-200' : signReport.classification === 'inverted' ? 'border-red-300' : 'border-amber-200'}`}>
+                  <div className={`px-3 py-2 text-[10px] font-semibold ${signReport.classification === 'standard' ? 'bg-green-50 text-green-700' : signReport.classification === 'inverted' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-800'}`}>
+                    Sign convention: {signReport.classification} ({signReport.code})
+                  </div>
+                  <div className="px-3 py-2">
+                    <table className="w-full text-[11px]">
+                      <thead>
+                        <tr className="text-left text-gray-400">
+                          <th className="py-1 font-semibold">Type</th>
+                          <th className="py-1 font-semibold">Total</th>
+                          <th className="py-1 font-semibold">Expected</th>
+                          <th className="py-1 font-semibold">Observed</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {(signReport.totals ?? []).map((t: any) => (
+                          <tr key={t.accountType} className={t.inverted ? 'text-red-700 font-semibold' : 'text-gray-600'}>
+                            <td className="py-1">{t.accountType}</td>
+                            <td className="py-1 font-mono">{t.total}</td>
+                            <td className="py-1">{t.expected}</td>
+                            <td className="py-1">{t.observed}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {signReport.classification === 'inverted' && (
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <input value={decisionReason} onChange={(e) => setDecisionReason(e.target.value)}
+                          placeholder="Reviewer reason (recommended)" maxLength={500}
+                          className="flex-1 min-w-40 border border-gray-200 rounded-button px-2 py-1.5 text-[11px]" />
+                        <button onClick={() => decideSign('confirm')} disabled={working !== null}
+                          className="text-[10px] font-semibold bg-green-700 text-white px-3 py-1.5 rounded-button disabled:opacity-50">
+                          Confirm inversion (× −1 on commit)
+                        </button>
+                        <button onClick={() => decideSign('reject')} disabled={working !== null}
+                          className="text-[10px] bg-red-50 text-red-700 border border-red-200 px-3 py-1.5 rounded-button disabled:opacity-50">
+                          Reject (fix source file)
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Feature 3 — prior-period bridge (behind INTAKE_PRIOR_BRIDGE) */}
+              {flags?.INTAKE_PRIOR_BRIDGE && bridgeReport && (
+                <div className="border border-gray-200 rounded-card overflow-hidden">
+                  <div className="px-3 py-2 bg-[#F8F9FA] text-[10px] font-semibold text-[#0A192F]">
+                    Prior-period bridge: {bridgeReport.priorRunId ? 'prior locked run found' : 'first period — no prior locked run'}
+                    {bridgeReport.priorRunId && (
+                      <span className="ml-2 text-gray-500 font-normal">
+                        new {bridgeReport.result.newAccounts?.length ?? 0} · missing {bridgeReport.result.missingAccounts?.length ?? 0} · renames {bridgeReport.result.renames?.length ?? 0} · mismatches {bridgeReport.result.mismatches?.length ?? 0}
+                      </span>
+                    )}
+                  </div>
+                  {(bridgeReport.result.renames ?? []).length > 0 && (
+                    <div className="px-3 py-2 border-t border-gray-100">
+                      <p className="text-[10px] font-semibold text-amber-800 uppercase tracking-wide mb-1">Possible renames (carry-forward proposed — accept in Proposals)</p>
+                      {(bridgeReport.result.renames ?? []).map((r: any, i: number) => (
+                        <div key={i} className="text-[11px] text-gray-600">
+                          “{r.prior.name}” → “{r.current.name}” · similarity {Math.round((r.similarity ?? 0) * 100)}%
+                          {r.prior.mapping ? ` · carries ${r.prior.mapping.taxAccountType}` : ' · no prior mapping'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {(bridgeReport.result.mismatches ?? []).length > 0 && (
+                    <div className="px-3 py-2 border-t border-gray-100">
+                      <p className="text-[10px] font-semibold text-red-700 uppercase tracking-wide mb-1">Opening-balance mismatches (block commit until resolved)</p>
+                      {(bridgeReport.result.mismatches ?? []).map((m: any, i: number) => (
+                        <div key={i} className="text-[11px] text-gray-600 font-mono">
+                          {m.current.name}: prior {m.priorClosing} vs import {m.currentOpening} (Δ £{m.delta})
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {bridgeItems.length > 0 && (
+                    <div className="px-3 py-2 border-t border-gray-100 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input value={decisionReason} onChange={(e) => setDecisionReason(e.target.value)}
+                          placeholder="Resolution reason (required)" maxLength={2000}
+                          className="flex-1 min-w-40 border border-gray-200 rounded-button px-2 py-1.5 text-[11px]" />
+                      </div>
+                      {bridgeItems.filter((i: any) => !['resolved', 'rejected', 'waived'].includes(i.status)).map((i: any) => (
+                        <div key={i.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                          <span className="text-gray-600">
+                            <span className="font-mono font-semibold text-[#0A192F]">{i.itemType}</span> · {i.status}
+                          </span>
+                          <button onClick={() => resolveBridgeItem(i.id)} disabled={working !== null}
+                            className="text-[10px] bg-[#0A192F] text-white px-3 py-1 rounded-button disabled:opacity-50">
+                            Resolve with reason
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 

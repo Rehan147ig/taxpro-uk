@@ -321,9 +321,6 @@ export function mapSheetToParsedRows(
 
   // Column order follows the sheet's physical order for mapped columns.
   const mappedCols: Array<{ index: number; canonical: string }> = [];
-  // Guard against duplicate user-visible names from merged headers: exceljs
-  // repeats the master value across the merge, so map each physical column
-  // independently (first occurrence wins for lookup, all map identically).
   for (let i = 0; i < headerCells.length; i++) {
     const userCol = headerCells[i];
     const canonical = columnMap[userCol];
@@ -331,6 +328,20 @@ export function mapSheetToParsedRows(
   }
   if (mappedCols.length === 0) {
     fail('EMPTY_COLUMN_MAP', 'Column map did not match any columns in the header row.');
+  }
+  // Merged headers make exceljs repeat the master value across the merge, so
+  // two physical columns can share one user-visible name — and downstream
+  // rowToRecord would silently keep only the last value. Reject instead: the
+  // operator unmerges the header row (or picks distinct headers) and retries.
+  // Merged *title* rows above the header row are unaffected (only the header
+  // row itself is checked).
+  const seenCanonical = new Map<string, number>();
+  for (const col of mappedCols) {
+    seenCanonical.set(col.canonical, (seenCanonical.get(col.canonical) ?? 0) + 1);
+  }
+  const collapsed = [...seenCanonical.entries()].filter(([, n]) => n > 1).map(([field]) => field);
+  if (collapsed.length > 0) {
+    fail('DUPLICATE_HEADER_COLLAPSE', `Header row maps ${collapsed.length} canonical field(s) twice (${collapsed.join(', ')}): two sheet columns share one header name (usually a merged header cell). Unmerge the header row so every column has a distinct name, then retry.`, { fields: collapsed });
   }
 
   const headers = mappedCols.map((c) => c.canonical);
