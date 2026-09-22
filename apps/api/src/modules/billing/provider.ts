@@ -7,10 +7,15 @@
  *
  * - `local`: manual/offline billing for dev + paid pilots (no vendor SDK,
  *   no network calls). Checkout returns instructions, never a URL.
- * - `stripe` / `dodo`: reserved names. Requesting one before its adapter
- *   is implemented throws a clear 501 (not a silent fallback), so a
- *   misconfiguration can never look like a successful payment.
+ * - `dodo`: Dodo Payments adapter (./dodo.ts — direct HTTPS REST, no SDK).
+ *   Requires DODO_PAYMENTS_API_KEY; without it the factory throws a clear
+ *   501 (not a silent fallback), so a misconfiguration can never look like
+ *   a successful payment.
+ * - `stripe`: reserved name. Requesting it before its adapter is implemented
+ *   throws a clear 501 for the same reason.
  */
+
+import { DodoBillingProvider } from './dodo.js';
 
 export type BillingProviderName = 'local' | 'stripe' | 'dodo';
 
@@ -105,7 +110,8 @@ export function getBillingProviderName(env: NodeJS.ProcessEnv = process.env): Bi
 export function getBillingProvider(env: NodeJS.ProcessEnv = process.env): BillingProvider {
   const name = getBillingProviderName(env);
   if (name === 'local') return new LocalBillingProvider();
-  // Stripe / Dodo adapters plug in here later (vendor SDK + webhook
-  // verification isolated to those classes). Until then, fail loudly.
+  if (name === 'dodo') return new DodoBillingProvider({ env });
+  // Stripe plugs in here later (vendor SDK + webhook verification isolated
+  // to that class). Until then, fail loudly.
   throw new ProviderNotConfiguredError(name);
 }
