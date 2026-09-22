@@ -40,6 +40,21 @@ export {
 } from './uk-frs102-s29/fiscal-years.js';
 export type { UkFiscalYearSlice } from './uk-frs102-s29/fiscal-years.js';
 export { remeasureUkDeferredTaxBalance, directionNoteFor } from './uk-frs102-s29/deferred-tax.js';
+export {
+  validateCt600Rules,
+  validateIxbrlDocument,
+  validateIxbrlStructure,
+  FRS102_SCHEMA_LOCK,
+} from './uk-frs102-s29/export-schema-validator.js';
+export type {
+  Ct600ValidationBox,
+  Ct600ValidationInput,
+  Ct600Violation,
+  Ct600ValidationResult,
+  IxbrlValidationInput,
+  IxbrlStructureOptions,
+  IxbrlValidationResult,
+} from './uk-frs102-s29/export-schema-validator.js';
 export { Jurisdiction } from './types.js';
 export { createEngine } from './engine-factory.js';
 export type { TaxEngine } from './engine-factory.js';
