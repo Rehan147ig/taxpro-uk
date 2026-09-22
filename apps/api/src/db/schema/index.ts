@@ -30,3 +30,4 @@ export { agentEvents } from './agent-events.js';
 export { usageEvents } from './usage-events.js';
 export { billingPlans, tenantSubscriptions, billingAccounts, tenantEntitlements } from './billing.js';
 export { intakeColumnMaps } from './intake-column-maps.js';
+export { assetRegisterItems } from './asset-register.js';

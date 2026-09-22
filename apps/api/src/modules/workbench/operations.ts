@@ -33,6 +33,8 @@ import {
   LOW_CONFIDENCE_THRESHOLD,
 } from './calculator.js';
 import { evaluateRunGates, type RunGateContext } from './gates.js';
+import { summarizeRegisterCapitalAllowances } from '../intake/asset-register.js';
+import { isIntakeAssetRegisterEnabled } from '../../config/features.js';
 import { hasOpenNonStandardPeriodItem } from './guard.js';
 import { recordLineageEdges } from '../../lib/lineage/edges.js';
 import { splitPeriodByUkFiscalYear, blendedUkMainRate } from '@taxpro/tax-engine';
@@ -237,13 +239,29 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
 
   const period = taxPeriod.startDate;
   const periodEnd = taxPeriod.endDate;
-  const { tbRows, accountRows, mappings } = await loadWorkbenchData(tx, {
+  const { tbRows, accountRows, mappings, assetItems } = await loadWorkbenchData(tx, {
     tenantId: payload.tenantId,
     entityId: payload.entityId,
     period,
     periodEnd,
     sourceDocumentId: payload.sourceDocumentId,
   });
+
+  // Feature 5 — feed the entity's asset register into the engine's CAA 2001
+  // pools alongside the TB computation (engine math untouched; results are
+  // reported, never silently substituted into book-tax differences).
+  const registerAssets = (assetItems ?? []).map((a) => ({
+    id: a.id,
+    assetDescription: a.assetDescription,
+    cost: a.cost,
+    poolType: a.poolType as 'main' | 'special_rate' | 'aia' | 'fya' | 'single_asset',
+    placedInServiceDate: a.placedInServiceDate,
+    disposalDate: a.disposalDate ?? null,
+    disposalProceeds: a.disposalProceeds ?? null,
+  }));
+  const capitalAllowances = isIntakeAssetRegisterEnabled() && registerAssets.length > 0
+    ? summarizeRegisterCapitalAllowances(registerAssets, period, periodEnd)
+    : null;
 
   if (tbRows.length === 0) {
     throw new BadRequestError('No trial balance rows are linked to this source document. Import the trial balance first.');
@@ -295,10 +313,19 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
       ? 'This tax period straddles fiscal years; the run flags the period for review and does not automatically split the rate calculation across years.'
       : 'The tax period falls within a single fiscal year.';
   }
+  if (capitalAllowances) {
+    warnings.push({
+      code: 'capital_allowances_register',
+      message: `Asset register fed ${capitalAllowances.assetCount} asset(s) into CAA 2001 pools: total allowance £${capitalAllowances.totalAllowance} across ${capitalAllowances.pools.length} pool(s). Book depreciation still drives the TB differences; allowances are reported for reviewer comparison.`,
+    });
+  }
+
   const assumptions = [
     'UK corporation tax main rate 25% applied per fiscal year (FY2023 onwards); small profits rate 19% below the small profits limit and marginal relief between the limits (CTA 2010 s.18D).',
     'Deferred tax computed under FRS 102 Section 29 with a full recovery assessment; no discounting is applied.',
-    'Capital allowances follow CAA 2001 pool treatment for UK fixed assets (main-pool WDA 18% by default; 100% first-year relief only when evidenced, otherwise a review item is raised).',
+    capitalAllowances
+      ? `Capital allowances computed from the asset register (${capitalAllowances.assetCount} asset(s), total £${capitalAllowances.totalAllowance}) alongside book depreciation; pool detail is in the run warnings.`
+      : 'Capital allowances follow CAA 2001 pool treatment for UK fixed assets (main-pool WDA 18% by default; 100% first-year relief only when evidenced, otherwise a review item is raised).',
     'R&D figures are taken from the trial balance as supported amounts; entitlement to enhanced relief requires manual review.',
     fiscalYearSplitNote,
   ];
@@ -359,6 +386,22 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
       description: 'This account is included in the trial balance but has no active tax mapping. A reviewer should classify it before final delivery.',
       accountId,
       sourceRef: account?.accountNumber,
+    });
+  }
+  // Feature 5 — informational gate: TB shows depreciable fixed-asset activity
+  // but the entity has no asset register at all. Severity low, never blocks
+  // the calculation (book basis still runs); resolved like any review item.
+  if (isIntakeAssetRegisterEnabled() && input.missingDepreciationMetadata.length > 0 && registerAssets.length === 0) {
+    openCount++;
+    await tx.insert(reviewItems).values({
+      tenantId: payload.tenantId,
+      provisionRunId: runId,
+      itemType: 'missing_asset_register',
+      severity: 'low',
+      title: 'No asset register for depreciable fixed assets',
+      description: `${input.missingDepreciationMetadata.length} depreciable account(s) have TB activity but the entity has no asset register items. Upload a register (POST /api/intake/entities/:entityId/assets) so capital allowances compute from evidence instead of book depreciation.`,
+      entityId: payload.entityId,
+      sourceRef: `entity:${payload.entityId}`,
     });
   }
   for (const accountId of input.missingDepreciationMetadata) {
@@ -465,7 +508,10 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
     actorType: 'system',
     actorUserId: payload.userId,
     reason: `Calculation completed with status ${openCount > 0 ? 'needs_review' : 'calculated'}`,
-    metadata: { resultId: result.id, openReviewItems: openCount, correlationId: payload.correlationId },
+    metadata: {
+      resultId: result.id, openReviewItems: openCount, correlationId: payload.correlationId,
+      ...(capitalAllowances ? { capitalAllowances } : {}),
+    },
   }, tx);
 
   return {
@@ -482,6 +528,7 @@ export async function runWorkbenchCalculationJob(tx: any, payload: WorkbenchCalc
     parentRunId: payload.parentRunId ?? null,
     summary: calculation.summary,
     warnings,
+    ...(capitalAllowances ? { capitalAllowances } : {}),
   };
 }
 

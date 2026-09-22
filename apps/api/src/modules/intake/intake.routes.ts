@@ -21,7 +21,9 @@ import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '.
 import { parseCsv, rowToRecord } from './csv.js';
 import { validateRow, buildBatchSummary } from './validate.js';
 import type { NormalizedRow } from './validate.js';
-import { isIntakeXlsxEnabled, isIntakeSignConventionEnabled, isIntakePriorBridgeEnabled } from '../../config/features.js';
+import { isIntakeXlsxEnabled, isIntakeSignConventionEnabled, isIntakePriorBridgeEnabled, isIntakeAssetRegisterEnabled } from '../../config/features.js';
+import { assetRegisterItems } from '../../db/schema/asset-register.js';
+import { ASSET_POOL_TYPES, validateAssetInput } from './asset-register.js';
 import {
   diffPriorPeriod,
   bridgeItemCount,
@@ -1934,6 +1936,134 @@ intakeRoutes.post('/batches/:id/bridge/items/:itemId/resolve', requireMinimumRol
       tenantId: user.tenantId, batchId, eventType: 'batch.bridge_item_resolved',
       actorUserId: user.userId, reason, afterState: { itemId: item.id, itemType: item.itemType },
     });
+    return c.json({ item: updated });
+  });
+});
+
+// ── Fixed Asset Register (Feature 5, behind INTAKE_ASSET_REGISTER) ──
+//
+// Detailed asset schedules per entity, fed into the engine's CAA 2001 pools
+// by the workbench calculator. Deletes are soft (is_active = false); the
+// runtime role has no DELETE/TRUNCATE. All reads/writes go through
+// withTenantContext with RLS fail-closed.
+
+function requireAssetRegisterEnabled(): void {
+  if (!isIntakeAssetRegisterEnabled()) {
+    throw new ForbiddenError('Asset register ingest is disabled (INTAKE_ASSET_REGISTER off)');
+  }
+}
+
+const assetItemSchema = z.object({
+  assetDescription: z.string().min(1).max(500),
+  cost: z.union([z.number(), z.string()]),
+  poolType: z.enum(ASSET_POOL_TYPES),
+  placedInServiceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  accountExternalId: z.string().max(255).optional(),
+  disposalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  disposalProceeds: z.union([z.number(), z.string()]).optional(),
+});
+
+const assetBulkSchema = z.object({
+  items: z.array(assetItemSchema).min(1).max(5000),
+});
+
+async function requireAssetEntity(tx: any, tenantId: string, entityId: string) {
+  // Tenant-scoped fetch (foreign ids → 404, never an existence oracle); RLS
+  // withTenantContext is the deeper fail-closed backstop.
+  const [entity] = await tx.select({ id: entities.id }).from(entities)
+    .where(and(eq(entities.tenantId, tenantId), eq(entities.id, entityId)))
+    .limit(1);
+  if (!entity) throw new NotFoundError('Entity', entityId);
+  return entity;
+}
+
+intakeRoutes.post('/entities/:entityId/assets', requireMinimumRole('preparer'), zValidator('json', assetBulkSchema), async (c) => {
+  requireAssetRegisterEnabled();
+  const user = c.get('user');
+  const { entityId } = c.req.param();
+  const { items } = c.req.valid('json');
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    await requireAssetEntity(tx, user.tenantId, entityId);
+
+    const failures: Array<{ index: number; issues: unknown }> = [];
+    const valid: Array<{ index: number; item: z.infer<typeof assetItemSchema> }> = [];
+    items.forEach((item, index) => {
+      const issues = validateAssetInput({
+        assetDescription: item.assetDescription,
+        cost: item.cost,
+        poolType: item.poolType,
+        placedInServiceDate: item.placedInServiceDate,
+        accountExternalId: item.accountExternalId,
+        disposalDate: item.disposalDate,
+        disposalProceeds: item.disposalProceeds,
+      });
+      if (issues.length > 0) failures.push({ index, issues });
+      else valid.push({ index, item });
+    });
+    if (failures.length > 0) {
+      throw new BadRequestError(
+        `${failures.length} asset(s) failed validation (${[...new Set(failures.flatMap((f) => (f.issues as { code: string }[]).map((i) => i.code)))].join(', ')})`,
+        { failures: failures.slice(0, 20) },
+      );
+    }
+
+    const inserted = await tx.insert(assetRegisterItems).values(
+      valid.map(({ item }) => ({
+        tenantId: user.tenantId,
+        entityId,
+        accountExternalId: item.accountExternalId ?? null,
+        assetDescription: item.assetDescription.trim(),
+        cost: String(item.cost),
+        poolType: item.poolType,
+        placedInServiceDate: item.placedInServiceDate,
+        disposalDate: item.disposalDate ?? null,
+        disposalProceeds: item.disposalProceeds !== undefined ? String(item.disposalProceeds) : null,
+      })),
+    ).returning();
+
+    return c.json({ items: inserted, count: inserted.length }, 201);
+  });
+});
+
+intakeRoutes.get('/entities/:entityId/assets', requireMinimumRole('reviewer'), async (c) => {
+  requireAssetRegisterEnabled();
+  const user = c.get('user');
+  const { entityId } = c.req.param();
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    await requireAssetEntity(tx, user.tenantId, entityId);
+    const items = await tx.select().from(assetRegisterItems)
+      .where(and(
+        eq(assetRegisterItems.tenantId, user.tenantId),
+        eq(assetRegisterItems.entityId, entityId),
+        eq(assetRegisterItems.isActive, true),
+      ))
+      .orderBy(assetRegisterItems.placedInServiceDate, assetRegisterItems.createdAt);
+    return c.json({ items });
+  });
+});
+
+intakeRoutes.delete('/entities/:entityId/assets/:id', requireMinimumRole('preparer'), async (c) => {
+  requireAssetRegisterEnabled();
+  const user = c.get('user');
+  const { entityId, id } = c.req.param();
+
+  return withTenantContext(user.tenantId, async (tx) => {
+    await requireAssetEntity(tx, user.tenantId, entityId);
+    const [item] = await tx.select().from(assetRegisterItems)
+      .where(and(
+        eq(assetRegisterItems.tenantId, user.tenantId),
+        eq(assetRegisterItems.entityId, entityId),
+        eq(assetRegisterItems.id, id),
+        eq(assetRegisterItems.isActive, true),
+      ))
+      .limit(1);
+    if (!item) throw new NotFoundError('Asset register item', id);
+    const [updated] = await tx.update(assetRegisterItems).set({
+      isActive: false,
+      updatedAt: new Date(),
+    }).where(eq(assetRegisterItems.id, item.id)).returning();
     return c.json({ item: updated });
   });
 });

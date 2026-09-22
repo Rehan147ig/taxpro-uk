@@ -14,8 +14,10 @@ import { computeBookTaxDifferences } from '@taxpro/tax-engine';
 import { trialBalance } from '../../db/schema/trial-balance.js';
 import { taxMappings } from '../../db/schema/tax-mappings.js';
 import { accounts } from '../../db/schema/accounts.js';
+import { assetRegisterItems } from '../../db/schema/asset-register.js';
 import { stableHash } from '../../eve/hash.js';
 import { runProvisionMath, resolveJurisdiction } from '../provision/provision-calculator.js';
+import { isIntakeAssetRegisterEnabled } from '../../config/features.js';
 
 export const INCOME_TYPES = new Set(['Income', 'Revenue', 'OtherIncome', 'Sales', 'ServiceRevenue']);
 export const EXPENSE_TYPES = new Set(['Expense', 'COGS', 'OtherExpense', 'OperatingExpense', 'SG&A', 'CostOfSales']);
@@ -77,7 +79,19 @@ export async function loadWorkbenchData(tx: NodePgDatabase, args: {
   const mappings = await tx.select().from(taxMappings)
     .where(and(eq(taxMappings.tenantId, args.tenantId), eq(taxMappings.isActive, true)));
 
-  return { tbRows, accountRows, mappings };
+  // Feature 5 — asset register items ride along with the TB snapshot so the
+  // run can feed them into the engine's CAA 2001 pools. Flag-gated; when off
+  // the run behaves exactly as before (empty list, no new warnings/items).
+  const assetItems = isIntakeAssetRegisterEnabled()
+    ? await tx.select().from(assetRegisterItems)
+      .where(and(
+        eq(assetRegisterItems.tenantId, args.tenantId),
+        eq(assetRegisterItems.entityId, args.entityId),
+        eq(assetRegisterItems.isActive, true),
+      ))
+    : [];
+
+  return { tbRows, accountRows, mappings, assetItems };
 }
 
 /**

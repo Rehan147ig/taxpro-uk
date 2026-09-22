@@ -370,6 +370,34 @@ detection on live rows before applying the × −1 transform and indexes the
 transform by row id; the XLSX column-map route documents its two-layer
 tenant guard (tenant-scoped fetch → 404, RLS fail-closed backstop).
 
+### 4.12 Messy-data ingest hardening — Feature 5: Asset register ingest
+
+Status: ✅ shipped behind `INTAKE_ASSET_REGISTER` (default off, per-tenant via env).
+
+Problem: the engine computes CAA 2001 capital allowances, but nothing fed
+it an asset schedule — depreciation vs allowances is one of the largest
+book-tax differences in a UK provision, and TB lines carry no
+placed-in-service dates, pools, or disposals.
+
+Flow: `POST /api/intake/entities/:entityId/assets` (bulk, `preparer`+,
+deterministic validator: `MISSING_REQUIRED`, `INVALID_POOL_TYPE`,
+`INVALID_DATE`, `INVALID_AMOUNT`, `DISPOSAL_BEFORE_ACQUISITION`) →
+`asset_register_items` (tenant-scoped RLS, soft deletes only) →
+`GET …/assets` (`reviewer`+, active only) → the workbench run loads the
+entity's register in `loadWorkbenchData`, feeds in-period additions and
+disposals per pool into `calculateUkCapitalAllowance`, and surfaces the
+result as a `capital_allowances_register` warning + assumption + run
+metadata. `pool_type` (`main`, `special_rate`, `aia`, `fya`,
+`single_asset`) maps onto the engine's `UkAllowancePool` in exactly one
+place (`POOL_TO_ENGINE_INPUT`); only AIA is ever auto-claimed, FYA falls
+back to pool treatment without evidenced new-&-unused status,
+`single_asset` items compute as individual pool balances, and `priorWDV`
+is zero in v1 (no brought-forward tracking — stated). If TB-depreciation
+activity exists with zero register items, one informational
+`missing_asset_register` item is raised; the run still computes book-basis.
+Engine inputs are never rerouted and engine math is untouched — allowances
+are reported alongside, not substituted into, book-tax differences.
+
 ---
 
 ## 5. Feature Flags: US Dormancy + Intake Hardening
