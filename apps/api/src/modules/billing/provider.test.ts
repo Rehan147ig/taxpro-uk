@@ -47,7 +47,9 @@ describe('getBillingProvider', () => {
   it('fails loudly for unimplemented vendors (never silent success)', () => {
     expect(() => getBillingProvider({ BILLING_PROVIDER: 'stripe' } as any))
       .toThrow(ProviderNotConfiguredError);
-    expect(() => getBillingProvider({ BILLING_PROVIDER: 'dodo' } as any))
-      .toThrow(ProviderNotConfiguredError);
+  });
+
+  it('returns the Dodo adapter (key checked per call, not at wiring time)', () => {
+    expect(getBillingProvider({ BILLING_PROVIDER: 'dodo' } as any).name).toBe('dodo');
   });
 });
