@@ -1,6 +1,7 @@
-# TaxPro UK — Pilot Partner Agreement (Template)
+# TaxPro UK — Pilot Partner Agreement (Template, one page of terms)
 
-**Status:** template for legal review — not executed advice.
+**Status:** template for legal review — not executed advice. One page of
+mutual terms; detail lives in the companions.
 **Companion:** `docs/PILOT_ONBOARDING_RUNBOOK.md` (operations),
 `docs/UK_NON_GOALS.md` (scope contract).
 
@@ -19,9 +20,12 @@ measured on historical engagements before any production reliance.
   reviewer workflow with maker-checker sign-off, locked-run immutability, and
   deterministic evidence packages (workbook, CT600 figures, iXBRL, audit ZIP).
 - TaxPro **is not**: a filer. It never submits to HMRC or Companies House.
-  **Final statutory sign-off remains at all times with the Firm's qualified
-  signing partner**, who must review every figure before filing through the
-  Firm's existing recognised software.
+  **Statutory sign-off remains at all times with the Firm's qualified signing
+  partner** (ICAEW Code of Ethics, professional competence and due care):
+  TaxPro is a reviewer-approved preparation workbench — every figure must be
+  reviewed and approved in-app before filing through the Firm's existing
+  recognised software. Nothing in TaxPro constitutes tax advice; judgement
+  calls are the partner's, recorded with reasons.
 - Out of scope (see `docs/UK_NON_GOALS.md`): VAT MTD, international tax,
   autonomous computation, US ASC 740 workstreams, secretarial filings.
 
@@ -62,10 +66,10 @@ measured on historical engagements before any production reliance.
 - **Evaluation:** free for the shadow-close set (up to 10 historical returns),
   including onboarding support per the runbook SLA.
 - **Paid pilot:** on meeting the exit criteria, preferred pricing of
-  **£65 per provision** (finalize/lock billable event) for the next
-  **50 year-ends**, billed from immutable usage events. Failed, rejected, or
-  abandoned runs are never billed. Over-quota and renewal pricing in the
-  order form.
+  **£60 per provision** (finalize/lock billable event) for the next
+  **50 live year-ends**, billed from immutable usage events. Failed,
+  rejected, or abandoned runs are never billed. Over-quota and renewal
+  pricing in the order form.
 - **Term & exit:** 6-month pilot term, terminable with 30 days' notice. No
   lock-in on data (§4); run history exports remain readable without a licence.
 
