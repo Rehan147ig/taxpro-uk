@@ -272,6 +272,25 @@ provisionRoutes.post('/run',
 
       const [result] = await tx.insert(provisionResults).values(resultValues).returning();
 
+      // Calc-time lineage: data_lineage_edges.target_id is uuid-typed, but the
+      // legacy/Eve calculation paths key temporary differences by account
+      // NUMBER ('5200'), not accounts.id. Resolve numbers to uuids in one
+      // query; skip edges that cannot be resolved. A missing graph edge must
+      // never abort a provision (previously: invalid uuid syntax → aborted
+      // transaction → HTTP 500 on any run with temporary differences).
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const diffsForLineage = calculationInput.temporaryDifferences ?? [];
+      const nonUuidNumbers = [...new Set(
+        diffsForLineage.map((d) => d.accountId).filter((id) => !UUID_RE.test(id)),
+      )];
+      let numberToAccountId = new Map<string, string>();
+      if (nonUuidNumbers.length > 0) {
+        const resolved = await tx.select({ id: accounts.id, accountNumber: accounts.accountNumber }).from(accounts)
+          .where(and(eq(accounts.tenantId, user.tenantId), inArray(accounts.accountNumber, nonUuidNumbers)));
+        numberToAccountId = new Map(
+          resolved.filter((r) => r.accountNumber).map((r) => [r.accountNumber as string, r.id]),
+        );
+      }
       await recordLineageEdges(tx, [
         {
           tenantId: user.tenantId,
@@ -279,13 +298,17 @@ provisionRoutes.post('/run',
           targetKind: 'provision_result', targetId: result.id,
           relation: 'produced',
         },
-        ...(calculationInput.temporaryDifferences ?? []).map((d) => ({
-          tenantId: user.tenantId,
-          sourceKind: 'provision_result', sourceId: result.id,
-          targetKind: 'account', targetId: d.accountId,
-          relation: 'used_balance',
-          metadata: { timingCategory: d.timingCategory ?? 'TEMP_OTHER', difference: String(d.difference) },
-        })),
+        ...diffsForLineage.flatMap((d) => {
+          const targetId = UUID_RE.test(d.accountId) ? d.accountId : numberToAccountId.get(d.accountId);
+          if (!targetId) return [];
+          return [{
+            tenantId: user.tenantId,
+            sourceKind: 'provision_result', sourceId: result.id,
+            targetKind: 'account', targetId,
+            relation: 'used_balance',
+            metadata: { timingCategory: d.timingCategory ?? 'TEMP_OTHER', difference: String(d.difference) },
+          }];
+        }),
       ]);
 
       // ── Sprint 1 billing fix ──

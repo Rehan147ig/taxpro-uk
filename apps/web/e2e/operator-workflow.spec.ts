@@ -82,7 +82,7 @@ test('operator workflow: provision -> review -> partner sign-off -> lock -> audi
   const pPage = await partnerContext.newPage();
   await login(pPage, PARTNER_EMAIL);
 
-  await pPage.getByRole('link', { name: 'Review Queue' }).click();
+  await pPage.getByRole('link', { name: 'Review Queue', exact: true }).click();
   const runRow = pPage.locator('tbody tr').filter({ hasText: testPeriodStart }).first();
   await runRow.click();
   await expect(pPage.getByRole('button', { name: 'Partner Sign-off' })).toBeVisible();
