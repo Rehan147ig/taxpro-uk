@@ -24,11 +24,11 @@
     "lint": "tsc --noEmit -p tsconfig.lint.json"
   },
   "devDependencies": {
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "@taxpro/tax-engine": "*",
     "decimal.js": "^10.6.0",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.4"
   }
 }
